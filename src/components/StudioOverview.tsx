@@ -41,12 +41,12 @@ export const StudioOverview: React.FC<StudioOverviewProps> = ({
         <div className="grid grid-cols-1 lg:grid-cols-12 items-stretch">
           <div className="lg:col-span-5 p-8 sm:p-10 flex flex-col justify-between gap-8">
             <div className="space-y-4">
-              <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
-                <span>TikTok</span>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-medium text-slate-400">
+                <span className="whitespace-nowrap">TikTok</span>
                 <span aria-hidden="true">·</span>
-                <span>Instagram Reels</span>
+                <span className="whitespace-nowrap">Instagram Reels</span>
                 <span aria-hidden="true">·</span>
-                <span>YouTube 4K</span>
+                <span className="whitespace-nowrap">YouTube 4K</span>
               </div>
 
               <h2 className="font-display text-3xl sm:text-4xl font-bold tracking-tight text-slate-50 leading-[1.1]">

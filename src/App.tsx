@@ -28,6 +28,8 @@ import { ScriptsStudio } from './components/ScriptsStudio';
 import { CaptionsStudio } from './components/CaptionsStudio';
 import { SubtitlesStudio } from './components/SubtitlesStudio';
 import { ClipsStudio } from './components/ClipsStudio';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import creatorAvatarImg from './assets/images/creator_avatar_1795421850716.jpg';
 
 const STORAGE_KEY = 'viralflow_session_history_v1';
@@ -252,23 +254,26 @@ export default function App() {
       </div>
 
       {/* Creator Workspace Footer */}
-      <div className="p-4 border-t border-white/10 flex items-center gap-3 shrink-0">
-        {!avatarError ? (
-          <img
-            src={creatorAvatarImg}
-            alt="Creator workspace profile"
-            referrerPolicy="no-referrer"
-            onError={() => setAvatarError(true)}
-            className="w-9 h-9 rounded-full object-cover border border-white/15 shrink-0"
-          />
-        ) : (
-          <div className="w-9 h-9 rounded-full bg-slate-800 text-slate-200 text-xs font-semibold flex items-center justify-center shrink-0">
-            VF
+      <div className="p-4 border-t border-white/10 space-y-3 shrink-0">
+        <PWAInstallButton />
+        <div className="flex items-center gap-3">
+          {!avatarError ? (
+            <img
+              src={creatorAvatarImg}
+              alt="Creator workspace profile"
+              referrerPolicy="no-referrer"
+              onError={() => setAvatarError(true)}
+              className="w-9 h-9 rounded-full object-cover border border-white/15 shrink-0"
+            />
+          ) : (
+            <div className="w-9 h-9 rounded-full bg-slate-800 text-slate-200 text-xs font-semibold flex items-center justify-center shrink-0">
+              VF
+            </div>
+          )}
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-slate-100 truncate">Creator Studio</p>
+            <p className="text-[13px] text-slate-400 truncate">TikTok · Reels · Shorts</p>
           </div>
-        )}
-        <div className="min-w-0">
-          <p className="text-xs font-semibold text-slate-100 truncate">Creator Studio</p>
-          <p className="text-[13px] text-slate-400 truncate">TikTok · Reels · Shorts</p>
         </div>
       </div>
     </div>
@@ -276,6 +281,7 @@ export default function App() {
 
   return (
     <div id="top" className="min-h-screen flex bg-[#070A10] text-slate-100">
+      <OfflineIndicator />
       {/* Desktop Sidebar */}
       <aside className="hidden lg:block w-[276px] shrink-0 sticky top-0 h-screen">
         <SidebarContent />
@@ -297,7 +303,7 @@ export default function App() {
       {/* Main Content Area */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Top Bar Contract */}
-        <header className="h-[68px] px-4 sm:px-8 bg-[#0B0F19]/95 backdrop-blur-sm border-b border-white/10 flex items-center justify-between gap-8 shrink-0 sticky top-0 z-30">
+        <header className="h-[68px] px-4 sm:px-8 bg-[#0B0F19]/95 backdrop-blur-sm border-b border-white/10 flex items-center justify-between gap-3 sm:gap-8 shrink-0 sticky top-0 z-30">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
