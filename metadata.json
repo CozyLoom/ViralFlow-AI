@@ -1,0 +1,6 @@
+{
+  "name": "ViralFlow AI",
+  "description": "Content creator assistant for TikTok, Instagram, and YouTube creators. Generates viral hooks, video scripts, captions and hashtags, time-coded subtitles, and short clips from long-form videos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
