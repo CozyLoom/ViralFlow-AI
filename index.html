@@ -13,9 +13,13 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
-  <body class="bg-[#070A10] text-slate-100 antialiased selection:bg-rose-500/30 selection:text-rose-200">
+  <body style="background-color:#070A10;color:#F1F5F9;margin:0;" class="bg-[#070A10] text-slate-100 antialiased selection:bg-rose-500/30 selection:text-rose-200">
     <div id="root"></div>
-    <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
-    <script type="module" src="/src/main.tsx"></script>
+    <script defer src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
+    <script
+      type="module"
+      src="/src/main.tsx"
+      onerror="document.getElementById('root').innerHTML='<div style=&quot;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:system-ui,sans-serif;background:#070A10;color:#f1f5f9&quot;><div style=&quot;max-width:480px;background:#0D121C;border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:24px&quot;><h1 style=&quot;margin:0 0 10px;font-size:18px&quot;>Build Required for GitHub Pages</h1><p style=&quot;margin:0;font-size:14px;line-height:1.6;color:#cbd5e1&quot;>GitHub is currently serving the unbuilt source index.html. In your repository <strong>Settings → Pages → Build and deployment</strong>, change <strong>Source</strong> from <em>Deploy from a branch</em> to <strong>GitHub Actions</strong>, then push or re-run the deploy workflow.</p></div></div>'"
+    ></script>
   </body>
 </html>
