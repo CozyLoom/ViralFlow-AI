@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Copy, Check, Loader2 } from 'lucide-react';
 import { CaptionsResponse } from '../types/creator';
+import { parseApiJson } from '../utils/api';
 
 interface CaptionsStudioProps {
   initialSummary?: string;
@@ -43,12 +44,9 @@ export const CaptionsStudio: React.FC<CaptionsStudioProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ videoSummary, niche, goal, cta }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to generate captions.');
-      }
+      const data = await parseApiJson<CaptionsResponse>(res, 'Failed to generate captions.');
       onResult(
-        data as CaptionsResponse,
+        data,
         videoSummary.trim().slice(0, 48),
         'TikTok · Instagram · YouTube'
       );

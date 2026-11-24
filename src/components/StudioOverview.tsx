@@ -1,6 +1,12 @@
 import React, { useState } from 'react';
 import { ArrowRight, Zap, FileText, Hash, Captions, Scissors, Film } from 'lucide-react';
 import { Platform, StudioModule } from '../types/creator';
+import studioHeroCinemaImg from '../assets/images/studio_hero_cinema_1795500268220.jpg';
+import podcastSuiteImg from '../assets/images/podcast_suite_session_1795500269499.jpg';
+import creatorReelImg from '../assets/images/creator_reel_studio_1795500269560.jpg';
+import cinemaOpticsImg from '../assets/images/cinema_optics_desk_1795500270761.jpg';
+import overheadRigImg from '../assets/images/overhead_rig_reel_1795500269759.jpg';
+import studioPreviewFrameImg from '../assets/images/studio_preview_frame_1795421850856.jpg';
 
 interface StudioOverviewProps {
   onSelectModule: (module: StudioModule) => void;
@@ -95,7 +101,7 @@ export const StudioOverview: React.FC<StudioOverviewProps> = ({
           <div className="lg:col-span-7 relative min-h-[320px] lg:min-h-[460px] bg-[#070A10]">
             {!imgErrors.hero ? (
               <img
-                src="/src/assets/images/studio_hero_cinema_1795500268220.jpg"
+                src={studioHeroCinemaImg}
                 alt="Flagship dark cinema filming and 4K color grading studio"
                 referrerPolicy="no-referrer"
                 onError={() => markImgError('hero')}
@@ -149,7 +155,7 @@ export const StudioOverview: React.FC<StudioOverviewProps> = ({
           >
             {!imgErrors.podcast ? (
               <img
-                src="/src/assets/images/podcast_suite_session_1795500269499.jpg"
+                src={podcastSuiteImg}
                 alt="Two creators recording a long-form video podcast in a sound-treated studio"
                 referrerPolicy="no-referrer"
                 onError={() => markImgError('podcast')}
@@ -183,7 +189,7 @@ export const StudioOverview: React.FC<StudioOverviewProps> = ({
           >
             {!imgErrors.reel1 ? (
               <img
-                src="/src/assets/images/creator_reel_studio_1795500269560.jpg"
+                src={creatorReelImg}
                 alt="Creator speaking into a broadcast condenser microphone in vertical 9:16 framing"
                 referrerPolicy="no-referrer"
                 onError={() => markImgError('reel1')}
@@ -217,7 +223,7 @@ export const StudioOverview: React.FC<StudioOverviewProps> = ({
           >
             {!imgErrors.optics ? (
               <img
-                src="/src/assets/images/cinema_optics_desk_1795500270761.jpg"
+                src={cinemaOpticsImg}
                 alt="Cinema prime lenses and calibrated waveform monitor on a production console"
                 referrerPolicy="no-referrer"
                 onError={() => markImgError('optics')}
@@ -249,7 +255,7 @@ export const StudioOverview: React.FC<StudioOverviewProps> = ({
           >
             {!imgErrors.overhead ? (
               <img
-                src="/src/assets/images/overhead_rig_reel_1795500269759.jpg"
+                src={overheadRigImg}
                 alt="Creator filming overhead B-roll under a studio cinema rig"
                 referrerPolicy="no-referrer"
                 onError={() => markImgError('overhead')}
@@ -281,7 +287,7 @@ export const StudioOverview: React.FC<StudioOverviewProps> = ({
           >
             {!imgErrors.preview ? (
               <img
-                src="/src/assets/images/studio_preview_frame_1795421850856.jpg"
+                src={studioPreviewFrameImg}
                 alt="Filmmaker at studio desk with broadcast microphone"
                 referrerPolicy="no-referrer"
                 onError={() => markImgError('preview')}

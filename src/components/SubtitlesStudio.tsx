@@ -7,6 +7,10 @@ import {
   downloadTextFile,
   formatMinutesSeconds,
 } from '../utils/exportHelpers';
+import { parseApiJson } from '../utils/api';
+import creatorReelImg from '../assets/images/creator_reel_studio_1795500269560.jpg';
+import overheadRigImg from '../assets/images/overhead_rig_reel_1795500269759.jpg';
+import studioPreviewFrameImg from '../assets/images/studio_preview_frame_1795421850856.jpg';
 
 interface SubtitlesStudioProps {
   initialTranscript?: string;
@@ -42,17 +46,17 @@ export const SubtitlesStudio: React.FC<SubtitlesStudioProps> = ({
   const REFERENCE_SCENES = {
     condenser: {
       label: 'Studio Mic',
-      src: '/src/assets/images/creator_reel_studio_1795500269560.jpg',
+      src: creatorReelImg,
       alt: 'Vertical 9:16 creator speaking into studio condenser mic',
     },
     overhead: {
       label: 'Overhead Rig',
-      src: '/src/assets/images/overhead_rig_reel_1795500269759.jpg',
+      src: overheadRigImg,
       alt: 'Vertical 9:16 creator filming desk shot under overhead cinema rig',
     },
     desk: {
       label: 'Desk Frame',
-      src: '/src/assets/images/studio_preview_frame_1795421850856.jpg',
+      src: studioPreviewFrameImg,
       alt: 'Vertical 9:16 creator at minimalist oak desk',
     },
   } as const;
@@ -148,12 +152,7 @@ export const SubtitlesStudio: React.FC<SubtitlesStudioProps> = ({
         });
       }
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to generate subtitles.');
-      }
-
-      const typed = data as SubtitlesResponse;
+      const typed = await parseApiJson<SubtitlesResponse>(res, 'Failed to generate subtitles.');
       setCues(typed.cues);
       setCurrentTime(0);
       onResult(

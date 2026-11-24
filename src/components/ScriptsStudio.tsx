@@ -6,6 +6,7 @@ import {
   formatMinutesSeconds,
   formatScriptForClipboard,
 } from '../utils/exportHelpers';
+import { parseApiJson } from '../utils/api';
 
 interface ScriptsStudioProps {
   initialTopic?: string;
@@ -87,11 +88,8 @@ export const ScriptsStudio: React.FC<ScriptsStudioProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic, platform, durationSec, tone, keyPoints }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to write video script.');
-      }
-      onResult(data as VideoScriptResponse, data.title || topic.trim(), platform);
+      const data = await parseApiJson<VideoScriptResponse>(res, 'Failed to write video script.');
+      onResult(data, data.title || topic.trim(), platform);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to generate script.');
     } finally {

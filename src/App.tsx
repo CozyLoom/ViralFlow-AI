@@ -28,6 +28,7 @@ import { ScriptsStudio } from './components/ScriptsStudio';
 import { CaptionsStudio } from './components/CaptionsStudio';
 import { SubtitlesStudio } from './components/SubtitlesStudio';
 import { ClipsStudio } from './components/ClipsStudio';
+import creatorAvatarImg from './assets/images/creator_avatar_1795421850716.jpg';
 
 const STORAGE_KEY = 'viralflow_session_history_v1';
 
@@ -254,7 +255,7 @@ export default function App() {
       <div className="p-4 border-t border-white/10 flex items-center gap-3 shrink-0">
         {!avatarError ? (
           <img
-            src="/src/assets/images/creator_avatar_1795421850716.jpg"
+            src={creatorAvatarImg}
             alt="Creator workspace profile"
             referrerPolicy="no-referrer"
             onError={() => setAvatarError(true)}

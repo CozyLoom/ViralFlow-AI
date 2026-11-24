@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Copy, Check, ArrowRight, Loader2, RotateCcw } from 'lucide-react';
 import { HookItem, HooksResponse, Platform } from '../types/creator';
+import { parseApiJson } from '../utils/api';
 
 interface HooksStudioProps {
   initialTopic?: string;
@@ -72,11 +73,8 @@ export const HooksStudio: React.FC<HooksStudioProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic, platform, audience, tone, count }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to generate hooks.');
-      }
-      onResult(data as HooksResponse, topic.trim().slice(0, 48), platform);
+      const data = await parseApiJson<HooksResponse>(res, 'Failed to generate hooks.');
+      onResult(data, topic.trim().slice(0, 48), platform);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to reach generation service.');
     } finally {
