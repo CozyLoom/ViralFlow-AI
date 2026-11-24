@@ -25,12 +25,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install dependencies
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --legacy-peer-deps
-          else
-            npm install --legacy-peer-deps
-          fi
+        run: rm -f package-lock.json && npm install --no-audit --no-fund --legacy-peer-deps
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Build static bundle
