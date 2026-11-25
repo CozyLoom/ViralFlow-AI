@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Copy, Check, ArrowRight, Loader2, RotateCcw } from 'lucide-react';
 import { BillingStatus, HookItem, HooksResponse, Platform } from '../types/creator';
-import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
+import { ApiRequestError, apiFetch, parseApiJson } from '../utils/api';
 
 interface HooksStudioProps {
   initialTopic?: string;
@@ -72,9 +72,9 @@ export const HooksStudio: React.FC<HooksStudioProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/generate/hooks', {
+      const res = await apiFetch('/api/generate/hooks', {
         method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic, platform, audience, tone, count }),
       });
       const raw = await parseApiJson<HooksResponse & { billing?: BillingStatus }>(

@@ -6,7 +6,7 @@ import {
   formatMinutesSeconds,
   formatScriptForClipboard,
 } from '../utils/exportHelpers';
-import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
+import { ApiRequestError, apiFetch, parseApiJson } from '../utils/api';
 
 interface ScriptsStudioProps {
   initialTopic?: string;
@@ -87,9 +87,9 @@ export const ScriptsStudio: React.FC<ScriptsStudioProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/generate/script', {
+      const res = await apiFetch('/api/generate/script', {
         method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic, platform, durationSec, tone, keyPoints }),
       });
       const raw = await parseApiJson<VideoScriptResponse & { billing?: BillingStatus }>(

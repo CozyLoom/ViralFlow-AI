@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Copy, Check, Loader2 } from 'lucide-react';
 import { BillingStatus, CaptionsResponse } from '../types/creator';
-import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
+import { ApiRequestError, apiFetch, parseApiJson } from '../utils/api';
 
 interface CaptionsStudioProps {
   initialSummary?: string;
@@ -43,9 +43,9 @@ export const CaptionsStudio: React.FC<CaptionsStudioProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/generate/captions', {
+      const res = await apiFetch('/api/generate/captions', {
         method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ videoSummary, niche, goal, cta }),
       });
       const raw = await parseApiJson<CaptionsResponse & { billing?: BillingStatus }>(

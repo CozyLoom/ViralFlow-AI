@@ -7,7 +7,7 @@ import {
   downloadTextFile,
   formatMinutesSeconds,
 } from '../utils/exportHelpers';
-import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
+import { ApiRequestError, apiFetch, parseApiJson } from '../utils/api';
 import creatorReelImg from '../assets/images/creator_reel_studio_1795500269560.jpg';
 import overheadRigImg from '../assets/images/overhead_rig_reel_1795500269759.jpg';
 import studioPreviewFrameImg from '../assets/images/studio_preview_frame_1795421850856.jpg';
@@ -144,15 +144,14 @@ export const SubtitlesStudio: React.FC<SubtitlesStudioProps> = ({
         formData.append('media', mediaFile);
         formData.append('maxWordsPerCue', String(maxWordsPerCue));
         formData.append('language', language);
-        res = await fetch('/api/generate/subtitles', {
+        res = await apiFetch('/api/generate/subtitles', {
           method: 'POST',
-          headers: getAuthHeaders(),
           body: formData,
         });
       } else {
-        res = await fetch('/api/generate/subtitles', {
+        res = await apiFetch('/api/generate/subtitles', {
           method: 'POST',
-          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ transcriptText, durationSec, maxWordsPerCue, language }),
         });
       }

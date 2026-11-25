@@ -39,7 +39,8 @@ interface PaddleGlobal {
   }) => void;
   Checkout: {
     open: (options: {
-      items: Array<{ priceId: string; quantity: number }>;
+      transactionId?: string;
+      items?: Array<{ priceId: string; quantity: number }>;
       customer?: { email: string };
       customData?: Record<string, string>;
       settings?: {
@@ -78,7 +79,7 @@ function formatPaddleErrorMessage(event: PaddleEvent): string {
     code === 'transaction_checkout_not_enabled' ||
     detail.includes('transaction_checkout_not_enabled')
   ) {
-    return 'Paddle checkouts are not enabled for this seller account yet (transaction_checkout_not_enabled). Complete your Paddle onboarding and domain approval in the Paddle Dashboard, or set sandbox VITE_PADDLE_CLIENT_TOKEN and VITE_PADDLE_PRICE_ID environment variables for testing.';
+    return 'Paddle checkouts are not enabled for this seller account yet (transaction_checkout_not_enabled). In your Paddle Dashboard: complete onboarding/verification, set a Default payment link under Checkout → Checkout settings, and approve your domain under Checkout → Website approval — or use Sandbox credentials.';
   }
 
   if (detail) {
@@ -106,6 +107,7 @@ async function waitForPaddleSdk(timeoutMs = 3500): Promise<PaddleGlobal> {
 export async function subscribeWithPaddle(params: {
   email: string;
   workspaceId: string;
+  transactionId?: string;
   onComplete: (payload: PaddleCheckoutCompletedPayload) => void;
   onClose?: () => void;
   onError?: (message: string) => void;
@@ -142,15 +144,26 @@ export async function subscribeWithPaddle(params: {
   }
 
   try {
-    paddle.Checkout.open({
-      items: [{ priceId: PADDLE_PRICE_ID, quantity: 1 }],
-      customer: { email: params.email },
-      customData: { userId: params.workspaceId },
-      settings: {
-        displayMode: 'overlay',
-        theme: 'dark',
-      },
-    });
+    if (params.transactionId) {
+      paddle.Checkout.open({
+        transactionId: params.transactionId,
+        customer: { email: params.email },
+        settings: {
+          displayMode: 'overlay',
+          theme: 'dark',
+        },
+      });
+    } else {
+      paddle.Checkout.open({
+        items: [{ priceId: PADDLE_PRICE_ID, quantity: 1 }],
+        customer: { email: params.email },
+        customData: { userId: params.workspaceId },
+        settings: {
+          displayMode: 'overlay',
+          theme: 'dark',
+        },
+      });
+    }
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Unable to open Paddle checkout.';

@@ -34,7 +34,7 @@ import { ClipsStudio } from './components/ClipsStudio';
 import { SubscriptionSection } from './components/SubscriptionSection';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import { getAuthHeaders, parseApiJson, setWorkspaceToken } from './utils/api';
+import { apiFetch, parseApiJson, setWorkspaceToken } from './utils/api';
 import creatorAvatarImg from './assets/images/creator_avatar_1795421850716.jpg';
 
 const STORAGE_KEY = 'viralflow_session_history_v1';
@@ -102,7 +102,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     setBillingLoading(true);
-    fetch('/api/billing/status?sync=1', { headers: getAuthHeaders() })
+    apiFetch('/api/billing/status?sync=1')
       .then((res) => parseApiJson<BillingStatus>(res, 'Unable to load subscription status.'))
       .then((status) => {
         if (cancelled) return;

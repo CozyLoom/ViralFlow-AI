@@ -13,6 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT) || 3000;
 
 const WORKSPACE_COOKIE_NAME = 'vf_workspace';
@@ -180,6 +181,75 @@ function setWorkspaceCookie(req: Request, res: Response, token: string) {
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
+function getConfiguredCorsOrigins(): Set<string> {
+  const origins = new Set<string>();
+  const rawValues = [
+    process.env.CORS_ORIGIN,
+    process.env.ALLOWED_ORIGINS,
+    process.env.APP_URL,
+  ];
+  for (const raw of rawValues) {
+    if (!raw || typeof raw !== 'string') continue;
+    for (const part of raw.split(',')) {
+      const trimmed = part.trim();
+      if (!trimmed || trimmed === '*') continue;
+      try {
+        const parsed = new URL(trimmed);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          origins.add(parsed.origin);
+        }
+      } catch {
+        // Ignore malformed origin entries
+      }
+    }
+  }
+  return origins;
+}
+
+function isAllowedOrigin(origin: string, req: Request): boolean {
+  try {
+    const parsedOrigin = new URL(origin);
+    if (parsedOrigin.protocol !== 'http:' && parsedOrigin.protocol !== 'https:') {
+      return false;
+    }
+
+    const forwardedHost =
+      typeof req.headers['x-forwarded-host'] === 'string'
+        ? req.headers['x-forwarded-host'].split(',')[0].trim()
+        : undefined;
+    const expectedHost = forwardedHost || req.headers.host;
+    if (expectedHost && parsedOrigin.host === expectedHost) {
+      return true;
+    }
+
+    const configuredOrigins = getConfiguredCorsOrigins();
+    return configuredOrigins.has(parsedOrigin.origin);
+  } catch {
+    return false;
+  }
+}
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const origin = req.headers.origin;
+  if (typeof origin === 'string' && isAllowedOrigin(origin, req)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+
+  if (req.method === 'OPTIONS') {
+    if (typeof origin === 'string' && !isAllowedOrigin(origin, req)) {
+      return res.status(403).json({ error: 'Origin not allowed by CORS policy.' });
+    }
+    return res.status(204).end();
+  }
+
+  next();
+});
+
 function verifySameOriginForCookieAuth(req: Request): boolean {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -187,6 +257,8 @@ function verifySameOriginForCookieAuth(req: Request): boolean {
   }
   const origin = req.headers.origin;
   if (!origin) return true;
+  if (!isAllowedOrigin(origin, req)) return false;
+
   try {
     const originHost = new URL(origin).host;
     const forwardedHost =
@@ -194,7 +266,11 @@ function verifySameOriginForCookieAuth(req: Request): boolean {
         ? req.headers['x-forwarded-host'].split(',')[0].trim()
         : undefined;
     const expectedHost = forwardedHost || req.headers.host;
-    return !expectedHost || originHost === expectedHost;
+    if (expectedHost && originHost === expectedHost) {
+      return true;
+    }
+    // Cross-origin cookie-authenticated state mutations require our custom header
+    return Boolean(req.headers['x-requested-with']);
   } catch {
     return false;
   }
@@ -286,8 +362,13 @@ function formatBillingStatus(workspace: WorkspaceRecord, token?: string) {
   };
 }
 
+function getPaddleApiKey(): string {
+  const raw = process.env.PADDLE_API_KEY || '';
+  return raw.trim().replace(/^["']|["']$/g, '');
+}
+
 function getPaddleApiBaseUrl(): string {
-  const apiKey = process.env.PADDLE_API_KEY || '';
+  const apiKey = getPaddleApiKey();
   if (
     process.env.PADDLE_ENV === 'sandbox' ||
     apiKey.includes('_sdbx_') ||
@@ -299,7 +380,7 @@ function getPaddleApiBaseUrl(): string {
 }
 
 async function syncSubscriptionFromPaddle(workspace: WorkspaceRecord): Promise<boolean> {
-  const paddleApiKey = process.env.PADDLE_API_KEY;
+  const paddleApiKey = getPaddleApiKey();
   if (!paddleApiKey || !workspace.paddleSubscriptionId) return false;
 
   const subRes = await fetch(
@@ -433,11 +514,8 @@ function verifyPaddleSignature(
   });
 }
 
-// Paddle Billing Webhook (raw body required BEFORE express.json)
-app.post(
-  '/api/webhooks/paddle',
-  express.raw({ type: 'application/json', limit: '1mb' }),
-  (req: Request, res: Response) => {
+// Paddle Billing Webhooks (raw body required BEFORE express.json)
+function handlePaddleWebhook(req: Request, res: Response) {
     const webhookSecret = process.env.PADDLE_WEBHOOK_SECRET;
     if (!webhookSecret) {
       return res.status(503).json({
@@ -539,15 +617,33 @@ app.post(
       console.error('[ViralFlow Billing] Webhook parse error:', err);
       return res.status(400).json({ error: 'Malformed webhook payload.' });
     }
-  }
-);
+}
+
+const paddleRawMiddleware = express.raw({ type: 'application/json', limit: '1mb' });
+app.post('/api/paddle/webhook', paddleRawMiddleware, handlePaddleWebhook);
+app.post('/api/webhooks/paddle', paddleRawMiddleware, handlePaddleWebhook);
 
 app.use(express.json({ limit: '10mb' }));
+
+// Health Check Route
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({
+    ok: true,
+    service: 'viralflow-ai',
+    timestamp: new Date().toISOString(),
+    paddle: {
+      apiKeyConfigured: Boolean(getPaddleApiKey()),
+      webhookSecretConfigured: Boolean(process.env.PADDLE_WEBHOOK_SECRET),
+      environment: getPaddleApiBaseUrl().includes('sandbox') ? 'sandbox' : 'live',
+    },
+    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+  });
+});
 
 // Billing Status Route
 app.get('/api/billing/status', async (req: Request, res: Response) => {
   const { workspace, token } = getOrCreateWorkspace(req, res);
-  if (req.query.sync === '1' && workspace.paddleSubscriptionId && process.env.PADDLE_API_KEY) {
+  if (req.query.sync === '1' && workspace.paddleSubscriptionId && getPaddleApiKey()) {
     try {
       await syncSubscriptionFromPaddle(workspace);
     } catch {
@@ -580,7 +676,7 @@ app.post('/api/billing/sync', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Invalid request origin.' });
   }
   const { workspace, token } = getOrCreateWorkspace(req, res);
-  if (workspace.paddleSubscriptionId && process.env.PADDLE_API_KEY) {
+  if (workspace.paddleSubscriptionId && getPaddleApiKey()) {
     try {
       await syncSubscriptionFromPaddle(workspace);
     } catch (err) {
@@ -604,7 +700,7 @@ app.post('/api/billing/cancel', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'No active subscription to cancel.' });
   }
 
-  const paddleApiKey = process.env.PADDLE_API_KEY;
+  const paddleApiKey = getPaddleApiKey();
   if (!paddleApiKey || !workspace.paddleSubscriptionId) {
     return res.status(400).json({
       error:
@@ -660,6 +756,116 @@ app.post('/api/billing/cancel', async (req: Request, res: Response) => {
   }
 });
 
+// Pre-create & validate Paddle Checkout Transaction (prevents client-side checkout errors when account isn't enabled)
+app.post('/api/billing/checkout', async (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+
+  const { workspace, token } = getOrCreateWorkspace(req, res);
+  const { priceId, clientEnv } = req.body ?? {};
+  const cleanPriceId = typeof priceId === 'string' ? priceId.trim() : '';
+
+  if (!/^pri_[a-zA-Z0-9]+$/.test(cleanPriceId)) {
+    return res.status(400).json({ error: 'Valid Paddle price ID is required.' });
+  }
+
+  const paddleApiKey = getPaddleApiKey();
+  const serverEnv = getPaddleApiBaseUrl().includes('sandbox') ? 'sandbox' : 'live';
+
+  if (!paddleApiKey) {
+    return res.json({
+      fallbackToClientItems: true,
+      environment: serverEnv,
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+
+  if ((clientEnv === 'sandbox' || clientEnv === 'live') && clientEnv !== serverEnv) {
+    return res.status(400).json({
+      code: 'paddle_environment_mismatch',
+      error: `Paddle environment mismatch: the backend PADDLE_API_KEY is configured for ${serverEnv}, while the frontend client token is ${clientEnv}. Set matching VITE_PADDLE_CLIENT_TOKEN, VITE_PADDLE_PRICE_ID, and PADDLE_API_KEY values.`,
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+
+  try {
+    const txnRes = await fetch(`${getPaddleApiBaseUrl()}/transactions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${paddleApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        items: [{ price_id: cleanPriceId, quantity: 1 }],
+        custom_data: { userId: workspace.id },
+      }),
+    });
+
+    const txnPayload = (await txnRes.json()) as {
+      data?: {
+        id?: string;
+        checkout?: { url?: string | null } | null;
+      };
+      error?: {
+        code?: string;
+        detail?: string;
+      };
+    };
+
+    if (!txnRes.ok) {
+      const code = txnPayload.error?.code || 'paddle_transaction_error';
+      if (code === 'transaction_checkout_not_enabled') {
+        return res.status(400).json({
+          code: 'transaction_checkout_not_enabled',
+          error:
+            'Paddle checkouts are not enabled on this seller account yet. In your Paddle Dashboard: (1) complete account onboarding & payout verification, (2) set a Default payment link under Checkout → Checkout settings, and (3) approve this domain under Checkout → Website approval — or switch to Paddle Sandbox credentials.',
+          billing: formatBillingStatus(workspace, token),
+        });
+      }
+      if (code === 'authentication_malformed' || code === 'authentication_failed') {
+        return res.status(400).json({
+          code,
+          error:
+            'PADDLE_API_KEY on the server is not a valid Paddle Billing secret API key (expected format: pdl_live_apikey_... or pdl_sdbx_apikey_...). Update PADDLE_API_KEY in Secrets, and make sure your Paddle Dashboard has onboarding, Default payment link, and Website approval completed.',
+          billing: formatBillingStatus(workspace, token),
+        });
+      }
+      return res.status(400).json({
+        code,
+        error:
+          txnPayload.error?.detail ||
+          `Unable to initialize Paddle checkout (${code}). Verify your price ID and Paddle account settings.`,
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+
+    const txnId = txnPayload.data?.id;
+    const checkoutUrl = txnPayload.data?.checkout?.url;
+
+    if (!txnId || !checkoutUrl) {
+      return res.status(400).json({
+        code: 'transaction_checkout_not_enabled',
+        error:
+          'Paddle Checkout URL is unavailable. In your Paddle Dashboard, go to Checkout → Checkout settings to set a Default payment link and approve your domain under Checkout → Website approval.',
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+
+    return res.json({
+      transactionId: txnId,
+      environment: serverEnv,
+      billing: formatBillingStatus(workspace, token),
+    });
+  } catch (err) {
+    console.error('[ViralFlow Billing] Checkout transaction creation failed:', err);
+    return res.status(502).json({
+      error: 'Unable to reach Paddle API to initialize checkout. Please try again shortly.',
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+});
+
 // Client Checkout Confirmation Route (verifies transaction via Paddle API or webhook state)
 app.post('/api/billing/confirm', async (req: Request, res: Response) => {
   if (!verifySameOriginForCookieAuth(req)) {
@@ -695,7 +901,7 @@ app.post('/api/billing/confirm', async (req: Request, res: Response) => {
     });
   }
 
-  const paddleApiKey = process.env.PADDLE_API_KEY;
+  const paddleApiKey = getPaddleApiKey();
   if (!paddleApiKey) {
     return res.status(202).json({
       confirmed: false,
@@ -740,9 +946,18 @@ app.post('/api/billing/confirm', async (req: Request, res: Response) => {
     const customUserMatch =
       !txn?.custom_data?.userId || txn.custom_data.userId === workspace.id;
 
-    if (!validStatus || !customUserMatch) {
+    if (!customUserMatch) {
       return res.status(402).json({
-        error: 'Transaction is not yet completed for this workspace.',
+        error: 'Transaction does not match this workspace.',
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+
+    if (!validStatus) {
+      return res.status(202).json({
+        confirmed: false,
+        pending: true,
+        error: 'Payment is processing. Waiting for Paddle webhook confirmation to unlock the app automatically...',
         billing: formatBillingStatus(workspace, token),
       });
     }
@@ -1323,6 +1538,14 @@ async function startServer() {
       app.use(express.static(distPath));
       app.get('*', (_req, res) => {
         res.sendFile(path.join(distPath, 'index.html'));
+      });
+    } else {
+      app.get('/', (_req, res) => {
+        res.json({
+          ok: true,
+          service: 'viralflow-ai',
+          health: '/api/health',
+        });
       });
     }
   }

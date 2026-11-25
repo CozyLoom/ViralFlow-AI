@@ -6,7 +6,7 @@ import {
   formatClipsBrief,
   formatMinutesSeconds,
 } from '../utils/exportHelpers';
-import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
+import { ApiRequestError, apiFetch, parseApiJson } from '../utils/api';
 import creatorReelImg from '../assets/images/creator_reel_studio_1795500269560.jpg';
 import overheadRigImg from '../assets/images/overhead_rig_reel_1795500269759.jpg';
 import studioPreviewFrameImg from '../assets/images/studio_preview_frame_1795421850856.jpg';
@@ -114,15 +114,14 @@ export const ClipsStudio: React.FC<ClipsStudioProps> = ({
         const formData = new FormData();
         formData.append('media', mediaFile);
         formData.append('targetClipCount', String(targetClipCount));
-        res = await fetch('/api/generate/clips', {
+        res = await apiFetch('/api/generate/clips', {
           method: 'POST',
-          headers: getAuthHeaders(),
           body: formData,
         });
       } else {
-        res = await fetch('/api/generate/clips', {
+        res = await apiFetch('/api/generate/clips', {
           method: 'POST',
-          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             sourceText,
             totalDurationMinutes,

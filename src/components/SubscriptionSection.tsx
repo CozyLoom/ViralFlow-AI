@@ -10,8 +10,12 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { BillingStatus } from '../types/creator';
-import { getAuthHeaders, parseApiJson, setWorkspaceToken } from '../utils/api';
-import { subscribeWithPaddle } from '../utils/paddle';
+import { apiFetch, parseApiJson, setWorkspaceToken } from '../utils/api';
+import {
+  PADDLE_CLIENT_TOKEN,
+  PADDLE_PRICE_ID,
+  subscribeWithPaddle,
+} from '../utils/paddle';
 
 interface SubscriptionSectionProps {
   billing: BillingStatus | null;
@@ -64,11 +68,40 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     }
   }, [billing?.customerEmail, email]);
 
+  useEffect(() => {
+    if (!pendingNote || billing?.isSubscribed) return;
+
+    let attempts = 0;
+    const maxAttempts = 16;
+    const interval = window.setInterval(async () => {
+      attempts += 1;
+      try {
+        const res = await apiFetch('/api/billing/status?sync=1');
+        const status = await parseApiJson<BillingStatus>(
+          res,
+          'Unable to verify subscription status.'
+        );
+        if (status.token) setWorkspaceToken(status.token);
+        if (status.isSubscribed) {
+          window.clearInterval(interval);
+          setPendingNote(null);
+          setSuccessNote('Payment verified. All studio tools are now unlocked.');
+          onBillingUpdate(status);
+        }
+      } catch {
+        // Keep polling until maxAttempts
+      }
+      if (attempts >= maxAttempts) {
+        window.clearInterval(interval);
+      }
+    }, 2500);
+
+    return () => window.clearInterval(interval);
+  }, [pendingNote, billing?.isSubscribed, onBillingUpdate]);
+
   const ensureWorkspaceReady = async (): Promise<BillingStatus> => {
     if (billing?.workspaceId) return billing;
-    const res = await fetch('/api/billing/status', {
-      headers: getAuthHeaders(),
-    });
+    const res = await apiFetch('/api/billing/status');
     const status = await parseApiJson<BillingStatus>(
       res,
       'Unable to initialize billing workspace.'
@@ -87,9 +120,9 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     setPendingNote(null);
     setSuccessNote(null);
     try {
-      const res = await fetch('/api/billing/confirm', {
+      const res = await apiFetch('/api/billing/confirm', {
         method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionId, email: customerEmail }),
       });
       const contentType = res.headers.get('content-type') || '';
@@ -111,7 +144,7 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
       if (res.status === 202 || data.pending) {
         setPendingNote(
           data.error ||
-            'Checkout completed. Waiting for server verification to activate your subscription.'
+            'Checkout completed. Waiting for Paddle webhook confirmation to unlock the app automatically...'
         );
         return;
       }
@@ -133,9 +166,9 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     setError(null);
     setSuccessNote(null);
     try {
-      const res = await fetch('/api/billing/sync', {
+      const res = await apiFetch('/api/billing/sync', {
         method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
       });
       const data = await parseApiJson<{ billing: BillingStatus }>(
         res,
@@ -175,14 +208,34 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
 
     try {
       const activeBilling = await ensureWorkspaceReady();
+      const checkoutRes = await apiFetch('/api/billing/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          priceId: PADDLE_PRICE_ID,
+          clientEnv: PADDLE_CLIENT_TOKEN.startsWith('test_') ? 'sandbox' : 'live',
+        }),
+      });
+      const checkoutData = await parseApiJson<{
+        transactionId?: string;
+        fallbackToClientItems?: boolean;
+        billing?: BillingStatus;
+      }>(checkoutRes, 'Unable to initialize Paddle checkout.');
+
+      if (checkoutData.billing) {
+        onBillingUpdate(checkoutData.billing);
+      }
+
       await subscribeWithPaddle({
         email: trimmedEmail,
         workspaceId: activeBilling.workspaceId,
+        transactionId: checkoutData.transactionId,
         onComplete: async ({ transactionId, customerEmail }) => {
           setSubmitting(false);
-          if (transactionId) {
+          const resolvedTxnId = transactionId || checkoutData.transactionId;
+          if (resolvedTxnId) {
             await confirmTransactionWithServer(
-              transactionId,
+              resolvedTxnId,
               customerEmail || trimmedEmail
             );
           } else {
@@ -216,9 +269,9 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     setError(null);
     setSuccessNote(null);
     try {
-      const res = await fetch('/api/billing/email', {
+      const res = await apiFetch('/api/billing/email', {
         method: 'PATCH',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmed }),
       });
       const data = await parseApiJson<{ billing: BillingStatus }>(
@@ -239,9 +292,9 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     setError(null);
     setSuccessNote(null);
     try {
-      const res = await fetch('/api/billing/cancel', {
+      const res = await apiFetch('/api/billing/cancel', {
         method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ effectiveFrom: 'next_billing_period' }),
       });
       const data = await parseApiJson<{ canceled?: boolean; billing: BillingStatus }>(
