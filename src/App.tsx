@@ -10,6 +10,8 @@ import {
   X,
   Plus,
   Trash2,
+  CreditCard,
+  Lock,
 } from 'lucide-react';
 import {
   BillingStatus,
@@ -29,9 +31,9 @@ import { ScriptsStudio } from './components/ScriptsStudio';
 import { CaptionsStudio } from './components/CaptionsStudio';
 import { SubtitlesStudio } from './components/SubtitlesStudio';
 import { ClipsStudio } from './components/ClipsStudio';
+import { SubscriptionSection } from './components/SubscriptionSection';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import { SubscriptionModal } from './components/SubscriptionModal';
 import { getAuthHeaders, parseApiJson, setWorkspaceToken } from './utils/api';
 import creatorAvatarImg from './assets/images/creator_avatar_1795421850716.jpg';
 
@@ -49,17 +51,18 @@ const NAV_ITEMS: Array<{
   { id: 'captions', label: 'Captions & Tags', subtitle: 'TikTok, Reels & YouTube SEO', icon: Hash },
   { id: 'subtitles', label: 'Subtitle Studio', subtitle: 'Timed cues, .SRT & .VTT', icon: Captions },
   { id: 'clips', label: 'Short Clips', subtitle: 'Long-to-short repurposer', icon: Scissors },
+  { id: 'subscription', label: 'Subscription', subtitle: 'Plan, billing & access', icon: CreditCard },
 ];
 
 export default function App() {
-  const [activeModule, setActiveModule] = useState<StudioModule>('overview');
+  const [activeModule, setActiveModule] = useState<StudioModule>('subscription');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
 
-  // Trial & subscription billing state
+  // Subscription billing state (blocks studio until payment succeeds)
   const [billing, setBilling] = useState<BillingStatus | null>(null);
-  const [subscriptionModalOpen, setSubscriptionModalOpen] = useState(false);
-  const [subscriptionModalReason, setSubscriptionModalReason] = useState<'upgrade' | 'exhausted'>('upgrade');
+  const [billingLoading, setBillingLoading] = useState(true);
+  const [blockedNotice, setBlockedNotice] = useState<string | null>(null);
 
   // Module results state
   const [hooksResult, setHooksResult] = useState<HooksResponse | null>(null);
@@ -98,29 +101,70 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/billing/status', { headers: getAuthHeaders() })
-      .then((res) => parseApiJson<BillingStatus>(res, 'Unable to load plan status.'))
+    setBillingLoading(true);
+    fetch('/api/billing/status?sync=1', { headers: getAuthHeaders() })
+      .then((res) => parseApiJson<BillingStatus>(res, 'Unable to load subscription status.'))
       .then((status) => {
         if (cancelled) return;
         if (status.token) setWorkspaceToken(status.token);
         setBilling(status);
+        if (status.isSubscribed) {
+          setActiveModule((prev) => (prev === 'subscription' ? 'overview' : prev));
+          setBlockedNotice(null);
+        } else {
+          setActiveModule('subscription');
+        }
       })
       .catch(() => {
-        // Static hosting or offline mode: keep UI usable without blocking
+        if (cancelled) return;
+        setActiveModule('subscription');
+        setBlockedNotice(
+          'Subscription verification requires the live studio backend server. Complete payment once connected to unlock the app.'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setBillingLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
+  const isAppUnlocked = Boolean(billing?.isSubscribed);
+
   const handleBillingUpdate = (next: BillingStatus) => {
     if (next.token) setWorkspaceToken(next.token);
+    const wasSubscribed = Boolean(billing?.isSubscribed);
     setBilling(next);
+    if (next.isSubscribed) {
+      setBlockedNotice(null);
+      if (!wasSubscribed) {
+        setActiveModule('overview');
+      }
+    } else {
+      setActiveModule('subscription');
+    }
   };
 
-  const openSubscriptionModal = (reason: 'upgrade' | 'exhausted' = 'upgrade') => {
-    setSubscriptionModalReason(reason);
-    setSubscriptionModalOpen(true);
+  const navigateToModule = (target: StudioModule) => {
+    if (!isAppUnlocked && target !== 'subscription') {
+      setBlockedNotice(
+        'Studio tools are locked until your Subscription payment is completed successfully.'
+      );
+      setActiveModule('subscription');
+      setMobileMenuOpen(false);
+      return;
+    }
+    setBlockedNotice(null);
+    setActiveModule(target);
+    setMobileMenuOpen(false);
+  };
+
+  const handleRequireSubscription = () => {
+    setBlockedNotice(
+      'Active ViralFlow Pro subscription required. Complete payment below to unlock the studio.'
+    );
+    setActiveModule('subscription');
     setMobileMenuOpen(false);
   };
 
@@ -176,7 +220,8 @@ export default function App() {
     if (activeModule === 'clips') setClipsResult(null);
   };
 
-  const activeNav = NAV_ITEMS.find((n) => n.id === activeModule) || NAV_ITEMS[0];
+  const effectiveModule: StudioModule = isAppUnlocked ? activeModule : 'subscription';
+  const activeNav = NAV_ITEMS.find((n) => n.id === effectiveModule) || NAV_ITEMS[NAV_ITEMS.length - 1];
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full bg-[#0B0F19] border-r border-white/10">
@@ -186,7 +231,7 @@ export default function App() {
           href="#top"
           onClick={(e) => {
             e.preventDefault();
-            setActiveModule('overview');
+            navigateToModule(isAppUnlocked ? 'overview' : 'subscription');
           }}
           className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0"
         >
@@ -210,106 +255,117 @@ export default function App() {
           </span>
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
-            const isActive = activeModule === item.id;
+            const isActive = effectiveModule === item.id;
+            const isLocked = !isAppUnlocked && item.id !== 'subscription';
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => {
-                  setActiveModule(item.id);
-                  setMobileMenuOpen(false);
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-colors ${
+                onClick={() => navigateToModule(item.id)}
+                className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg text-left transition-colors ${
                   isActive
                     ? 'bg-rose-500/15 text-rose-300'
+                    : isLocked
+                    ? 'text-slate-500 hover:bg-white/[0.03] hover:text-slate-300'
                     : 'text-slate-200 hover:bg-white/[0.05] hover:text-white'
                 }`}
               >
-                <Icon
-                  className={`w-4 h-4 shrink-0 ${
-                    isActive ? 'text-rose-400' : 'text-slate-400'
-                  }`}
-                />
-                <div className="min-w-0">
-                  <span className="block text-sm font-medium leading-tight whitespace-nowrap truncate">
-                    {item.label}
-                  </span>
-                  <span
-                    className={`block text-[13px] truncate mt-0.5 ${
-                      isActive ? 'text-rose-200/75' : 'text-slate-400'
+                <div className="flex items-center gap-3 min-w-0">
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      isActive
+                        ? 'text-rose-400'
+                        : isLocked
+                        ? 'text-slate-600'
+                        : 'text-slate-400'
                     }`}
-                  >
-                    {item.subtitle}
-                  </span>
+                  />
+                  <div className="min-w-0">
+                    <span className="block text-sm font-medium leading-tight whitespace-nowrap truncate">
+                      {item.label}
+                    </span>
+                    <span
+                      className={`block text-[13px] truncate mt-0.5 ${
+                        isActive
+                          ? 'text-rose-200/75'
+                          : isLocked
+                          ? 'text-slate-600'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      {item.subtitle}
+                    </span>
+                  </div>
                 </div>
+                {isLocked && <Lock className="w-3.5 h-3.5 text-slate-600 shrink-0" />}
               </button>
             );
           })}
         </nav>
 
-        {/* Recent Creations */}
-        <div className="pt-4 border-t border-white/10">
-          <div className="px-3 pb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-400">Recent Drafts</span>
-            {history.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setHistory([])}
-                className="text-xs text-slate-400 hover:text-slate-200"
-                aria-label="Clear recent drafts"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+        {/* Recent Creations (only accessible after subscription is active) */}
+        {isAppUnlocked && (
+          <div className="pt-4 border-t border-white/10">
+            <div className="px-3 pb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-slate-400">Recent Drafts</span>
+              {history.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setHistory([])}
+                  className="text-xs text-slate-400 hover:text-slate-200"
+                  aria-label="Clear recent drafts"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            {history.length > 0 ? (
+              <div className="space-y-1">
+                {history.slice(0, 6).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => loadHistoryItem(item)}
+                    className="w-full px-3 py-2 rounded-lg text-left hover:bg-white/[0.05] transition-colors"
+                  >
+                    <span className="block text-xs font-medium text-slate-200 truncate">
+                      {item.title}
+                    </span>
+                    <span className="block text-[13px] text-slate-400 truncate tabular-nums">
+                      {NAV_ITEMS.find((n) => n.id === item.module)?.label} · {item.createdAt}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="px-3 text-xs text-slate-400 leading-relaxed">
+                Generated hooks, scripts, subtitles, and clips appear here.
+              </p>
             )}
           </div>
-
-          {history.length > 0 ? (
-            <div className="space-y-1">
-              {history.slice(0, 6).map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => loadHistoryItem(item)}
-                  className="w-full px-3 py-2 rounded-lg text-left hover:bg-white/[0.05] transition-colors"
-                >
-                  <span className="block text-xs font-medium text-slate-200 truncate">
-                    {item.title}
-                  </span>
-                  <span className="block text-[13px] text-slate-400 truncate tabular-nums">
-                    {NAV_ITEMS.find((n) => n.id === item.module)?.label} · {item.createdAt}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="px-3 text-xs text-slate-400 leading-relaxed">
-              Generated hooks, scripts, subtitles, and clips appear here.
-            </p>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Creator Workspace Footer */}
       <div className="p-4 border-t border-white/10 space-y-3 shrink-0">
-        <div className="flex items-center justify-between gap-2 text-xs tabular-nums">
-          {billing?.isSubscribed ? (
+        <div className="flex items-center justify-between gap-2 text-xs">
+          {isAppUnlocked ? (
             <span className="font-medium text-emerald-400 truncate">
-              Pro Plan · Unlimited
+              Subscription · Active
             </span>
           ) : (
-            <span className="text-slate-300 truncate">
-              Free Trial · {billing ? billing.trialRemaining ?? 0 : 3} of {billing?.trialLimit ?? 3} left
+            <span className="font-medium text-amber-300 truncate">
+              Subscription · Locked
             </span>
           )}
-          {!billing?.isSubscribed && (
-            <button
-              type="button"
-              onClick={() => openSubscriptionModal('upgrade')}
-              className="font-semibold text-rose-400 hover:text-rose-300 transition-colors whitespace-nowrap shrink-0"
-            >
-              Upgrade
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => navigateToModule('subscription')}
+            className="font-semibold text-rose-400 hover:text-rose-300 transition-colors whitespace-nowrap shrink-0"
+          >
+            {isAppUnlocked ? 'Manage' : 'Unlock'}
+          </button>
         </div>
         <PWAInstallButton />
         <div className="flex items-center gap-3">
@@ -372,7 +428,7 @@ export default function App() {
             <div className="flex items-center gap-2 text-sm min-w-0">
               <button
                 type="button"
-                onClick={() => setActiveModule('overview')}
+                onClick={() => navigateToModule(isAppUnlocked ? 'overview' : 'subscription')}
                 className="text-slate-400 hover:text-white hidden sm:inline whitespace-nowrap shrink-0 transition-colors"
               >
                 Studio
@@ -387,45 +443,58 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4 shrink-0">
-            {billing?.isSubscribed ? (
-              <span className="hidden sm:inline text-xs font-medium text-emerald-400 whitespace-nowrap shrink-0">
-                Pro Active
-              </span>
+            {isAppUnlocked ? (
+              effectiveModule === 'subscription' ? (
+                <button
+                  type="button"
+                  onClick={() => navigateToModule('overview')}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0"
+                >
+                  Open Studio
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleResetActiveDraft}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  {effectiveModule === 'overview' ? 'New Project' : 'New Draft'}
+                </button>
+              )
             ) : (
-              <button
-                type="button"
-                onClick={() => openSubscriptionModal('upgrade')}
-                className="text-xs font-medium text-slate-300 hover:text-white transition-colors whitespace-nowrap shrink-0 tabular-nums"
-              >
-                Trial: {billing ? billing.trialRemaining ?? 0 : 3}/{billing?.trialLimit ?? 3} left ·{' '}
-                <span className="text-rose-400 font-semibold">Upgrade</span>
-              </button>
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-300 whitespace-nowrap shrink-0">
+                <Lock className="w-3.5 h-3.5" />
+                Payment Required
+              </span>
             )}
-            <button
-              type="button"
-              onClick={handleResetActiveDraft}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              {activeModule === 'overview' ? 'New Project' : 'New Draft'}
-            </button>
           </div>
         </header>
 
         {/* Active Module Viewport */}
         <main className="flex-1 p-4 sm:p-8 max-w-[1440px] w-full mx-auto">
-          {activeModule === 'overview' && (
+          {(!isAppUnlocked || effectiveModule === 'subscription') && (
+            <SubscriptionSection
+              billing={billing}
+              billingLoading={billingLoading}
+              blockedNotice={blockedNotice}
+              onBillingUpdate={handleBillingUpdate}
+              onEnterStudio={() => navigateToModule('overview')}
+            />
+          )}
+
+          {isAppUnlocked && effectiveModule === 'overview' && (
             <StudioOverview
-              onSelectModule={(mod) => setActiveModule(mod)}
+              onSelectModule={(mod) => navigateToModule(mod)}
               onQuickLaunchHooks={(topic, platform) => {
                 setHookDraftTopic(topic);
                 setHookDraftPlatform(platform);
-                setActiveModule('hooks');
+                navigateToModule('hooks');
               }}
             />
           )}
 
-          {activeModule === 'hooks' && (
+          {isAppUnlocked && effectiveModule === 'hooks' && (
             <HooksStudio
               initialTopic={hookDraftTopic}
               initialPlatform={hookDraftPlatform}
@@ -435,19 +504,19 @@ export default function App() {
                 recordHistory('hooks', title, platform, data);
               }}
               onBillingUpdate={handleBillingUpdate}
-              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
+              onRequireUpgrade={handleRequireSubscription}
               onSendToScript={(hook: HookItem, topic: string, platform: Platform) => {
                 setScriptDraftTopic(topic);
                 setScriptDraftPlatform(platform);
                 setScriptDraftKeyPoints(
                   `Opening Hook: "${hook.spokenHook}"\nOn-Screen Text: ${hook.onScreenText}\nVisual Direction: ${hook.visualDirection}`
                 );
-                setActiveModule('scripts');
+                navigateToModule('scripts');
               }}
             />
           )}
 
-          {activeModule === 'scripts' && (
+          {isAppUnlocked && effectiveModule === 'scripts' && (
             <ScriptsStudio
               initialTopic={scriptDraftTopic}
               initialPlatform={scriptDraftPlatform}
@@ -458,20 +527,20 @@ export default function App() {
                 recordHistory('scripts', title, platform, data);
               }}
               onBillingUpdate={handleBillingUpdate}
-              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
+              onRequireUpgrade={handleRequireSubscription}
               onSendToCaptions={(summary) => {
                 setCaptionDraftSummary(summary);
-                setActiveModule('captions');
+                navigateToModule('captions');
               }}
               onSendToSubtitles={(transcript, duration) => {
                 setSubtitleDraftTranscript(transcript);
                 setSubtitleDraftDuration(duration);
-                setActiveModule('subtitles');
+                navigateToModule('subtitles');
               }}
             />
           )}
 
-          {activeModule === 'captions' && (
+          {isAppUnlocked && effectiveModule === 'captions' && (
             <CaptionsStudio
               initialSummary={captionDraftSummary}
               result={captionsResult}
@@ -480,11 +549,11 @@ export default function App() {
                 recordHistory('captions', title, platform, data);
               }}
               onBillingUpdate={handleBillingUpdate}
-              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
+              onRequireUpgrade={handleRequireSubscription}
             />
           )}
 
-          {activeModule === 'subtitles' && (
+          {isAppUnlocked && effectiveModule === 'subtitles' && (
             <SubtitlesStudio
               initialTranscript={subtitleDraftTranscript}
               initialDurationSec={subtitleDraftDuration}
@@ -494,11 +563,11 @@ export default function App() {
                 recordHistory('subtitles', title, platform, data);
               }}
               onBillingUpdate={handleBillingUpdate}
-              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
+              onRequireUpgrade={handleRequireSubscription}
             />
           )}
 
-          {activeModule === 'clips' && (
+          {isAppUnlocked && effectiveModule === 'clips' && (
             <ClipsStudio
               result={clipsResult}
               onResult={(data, title, platform) => {
@@ -506,23 +575,15 @@ export default function App() {
                 recordHistory('clips', title, platform, data);
               }}
               onBillingUpdate={handleBillingUpdate}
-              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
+              onRequireUpgrade={handleRequireSubscription}
               onSendToCaptions={(summary) => {
                 setCaptionDraftSummary(summary);
-                setActiveModule('captions');
+                navigateToModule('captions');
               }}
             />
           )}
         </main>
       </div>
-
-      <SubscriptionModal
-        open={subscriptionModalOpen}
-        reason={subscriptionModalReason}
-        billing={billing}
-        onClose={() => setSubscriptionModalOpen(false)}
-        onBillingUpdate={handleBillingUpdate}
-      />
     </div>
   );
 }

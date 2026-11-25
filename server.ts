@@ -14,23 +14,29 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-const TRIAL_LIMIT = 3;
 const WORKSPACE_COOKIE_NAME = 'vf_workspace';
 const DATA_DIR = path.resolve(__dirname, '.data');
 const BILLING_STATE_FILE = path.join(DATA_DIR, 'billing-state.json');
 const BILLING_SECRET_FILE = path.join(DATA_DIR, 'billing-secret.key');
 
-type PlanStatus = 'trial' | 'active' | 'past_due' | 'canceled';
+type PlanStatus = 'inactive' | 'active' | 'past_due' | 'canceled';
+
+interface BillingManagementUrls {
+  updatePaymentMethod?: string | null;
+  cancel?: string | null;
+}
 
 interface WorkspaceRecord {
   id: string;
-  trialUsed: number;
   isSubscribed: boolean;
   planStatus: PlanStatus;
   customerEmail: string | null;
   paddleCustomerId: string | null;
   paddleSubscriptionId: string | null;
   lastTransactionId: string | null;
+  nextBilledAt: string | null;
+  cancelAt: string | null;
+  managementUrls: BillingManagementUrls | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -193,6 +199,39 @@ function verifySameOriginForCookieAuth(req: Request): boolean {
   }
 }
 
+function sanitizeHttpsUrl(url: string | undefined | null): string | null {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeWorkspaceRecord(id: string, raw?: Partial<WorkspaceRecord>): WorkspaceRecord {
+  const now = new Date().toISOString();
+  const rawStatus = raw?.planStatus as string | undefined;
+  const planStatus: PlanStatus =
+    rawStatus === 'active' || rawStatus === 'past_due' || rawStatus === 'canceled'
+      ? rawStatus
+      : 'inactive';
+  return {
+    id,
+    isSubscribed: Boolean(raw?.isSubscribed),
+    planStatus,
+    customerEmail: raw?.customerEmail ?? null,
+    paddleCustomerId: raw?.paddleCustomerId ?? null,
+    paddleSubscriptionId: raw?.paddleSubscriptionId ?? null,
+    lastTransactionId: raw?.lastTransactionId ?? null,
+    nextBilledAt: raw?.nextBilledAt ?? null,
+    cancelAt: raw?.cancelAt ?? null,
+    managementUrls: raw?.managementUrls ?? null,
+    createdAt: raw?.createdAt ?? now,
+    updatedAt: raw?.updatedAt ?? now,
+  };
+}
+
 function getOrCreateWorkspace(req: Request, res: Response): {
   workspace: WorkspaceRecord;
   token: string;
@@ -207,21 +246,9 @@ function getOrCreateWorkspace(req: Request, res: Response): {
     verifyWorkspaceToken(bearerToken) || verifyWorkspaceToken(cookieToken);
 
   if (verifiedId) {
-    let existing = billingStore.workspaces[verifiedId];
-    if (!existing) {
-      const now = new Date().toISOString();
-      existing = {
-        id: verifiedId,
-        trialUsed: 0,
-        isSubscribed: false,
-        planStatus: 'trial',
-        customerEmail: null,
-        paddleCustomerId: null,
-        paddleSubscriptionId: null,
-        lastTransactionId: null,
-        createdAt: now,
-        updatedAt: now,
-      };
+    const rawExisting = billingStore.workspaces[verifiedId];
+    const existing = normalizeWorkspaceRecord(verifiedId, rawExisting);
+    if (!rawExisting) {
       billingStore.workspaces[verifiedId] = existing;
       saveBillingStore();
     }
@@ -233,19 +260,7 @@ function getOrCreateWorkspace(req: Request, res: Response): {
   }
 
   const newId = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const created: WorkspaceRecord = {
-    id: newId,
-    trialUsed: 0,
-    isSubscribed: false,
-    planStatus: 'trial',
-    customerEmail: null,
-    paddleCustomerId: null,
-    paddleSubscriptionId: null,
-    lastTransactionId: null,
-    createdAt: now,
-    updatedAt: now,
-  };
+  const created = normalizeWorkspaceRecord(newId);
   billingStore.workspaces[newId] = created;
   saveBillingStore();
   const token = signWorkspaceId(newId);
@@ -256,28 +271,89 @@ function getOrCreateWorkspace(req: Request, res: Response): {
 function formatBillingStatus(workspace: WorkspaceRecord, token?: string) {
   return {
     workspaceId: workspace.id,
-    trialLimit: TRIAL_LIMIT,
-    trialUsed: workspace.trialUsed,
-    trialRemaining: workspace.isSubscribed
-      ? null
-      : Math.max(0, TRIAL_LIMIT - workspace.trialUsed),
     isSubscribed: workspace.isSubscribed,
     planStatus: workspace.planStatus,
     customerEmail: workspace.customerEmail,
+    paddleCustomerId: workspace.paddleCustomerId,
+    paddleSubscriptionId: workspace.paddleSubscriptionId,
+    lastTransactionId: workspace.lastTransactionId,
+    nextBilledAt: workspace.nextBilledAt,
+    cancelAt: workspace.cancelAt,
+    managementUrls: workspace.managementUrls,
+    updatedAt: workspace.updatedAt,
     ...(token ? { token } : {}),
   };
 }
 
-function requireTrialOrSubscription(req: Request, res: Response, next: NextFunction) {
+async function syncSubscriptionFromPaddle(workspace: WorkspaceRecord): Promise<boolean> {
+  const paddleApiKey = process.env.PADDLE_API_KEY;
+  if (!paddleApiKey || !workspace.paddleSubscriptionId) return false;
+
+  const subRes = await fetch(
+    `https://api.paddle.com/subscriptions/${encodeURIComponent(workspace.paddleSubscriptionId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${paddleApiKey}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  if (!subRes.ok) return false;
+
+  const payload = (await subRes.json()) as {
+    data?: {
+      id?: string;
+      status?: string;
+      customer_id?: string;
+      next_billed_at?: string | null;
+      scheduled_change?: { action?: string; effective_at?: string | null } | null;
+      management_urls?: { update_payment_method?: string | null; cancel?: string | null } | null;
+    };
+  };
+
+  const sub = payload.data;
+  if (!sub) return false;
+
+  if (sub.customer_id) workspace.paddleCustomerId = sub.customer_id;
+  workspace.nextBilledAt = sub.next_billed_at ?? null;
+  workspace.cancelAt =
+    sub.scheduled_change?.action === 'cancel'
+      ? sub.scheduled_change.effective_at ?? null
+      : null;
+
+  if (sub.management_urls) {
+    workspace.managementUrls = {
+      updatePaymentMethod: sanitizeHttpsUrl(sub.management_urls.update_payment_method),
+      cancel: sanitizeHttpsUrl(sub.management_urls.cancel),
+    };
+  }
+
+  if (sub.status === 'canceled' || sub.status === 'paused') {
+    workspace.isSubscribed = false;
+    workspace.planStatus = 'canceled';
+  } else if (sub.status === 'past_due') {
+    workspace.planStatus = 'past_due';
+  } else if (sub.status === 'active' || sub.status === 'trialing') {
+    workspace.isSubscribed = true;
+    workspace.planStatus = 'active';
+  }
+
+  workspace.updatedAt = new Date().toISOString();
+  billingStore.workspaces[workspace.id] = workspace;
+  saveBillingStore();
+  return true;
+}
+
+function requireActiveSubscription(req: Request, res: Response, next: NextFunction) {
   if (!verifySameOriginForCookieAuth(req)) {
     return res.status(403).json({ error: 'Invalid request origin.' });
   }
   const { workspace, token } = getOrCreateWorkspace(req, res);
-  if (!workspace.isSubscribed && workspace.trialUsed >= TRIAL_LIMIT) {
+  if (!workspace.isSubscribed) {
     return res.status(402).json({
       error:
-        'Your 3 free studio generations have been used. Subscribe to ViralFlow Pro to continue generating.',
-      code: 'TRIAL_EXHAUSTED',
+        'An active ViralFlow Pro subscription is required. Complete payment in the Subscription section to unlock the app.',
+      code: 'SUBSCRIPTION_REQUIRED',
       billing: formatBillingStatus(workspace, token),
     });
   }
@@ -292,9 +368,6 @@ function recordSuccessfulGeneration(req: Request) {
   const workspace = authedReq.workspace;
   if (!workspace) return undefined;
 
-  if (!workspace.isSubscribed) {
-    workspace.trialUsed = Math.min(TRIAL_LIMIT, workspace.trialUsed + 1);
-  }
   workspace.updatedAt = new Date().toISOString();
   billingStore.workspaces[workspace.id] = workspace;
   saveBillingStore();
@@ -378,6 +451,8 @@ app.post(
           status?: string;
           customer_id?: string;
           subscription_id?: string;
+          next_billed_at?: string | null;
+          scheduled_change?: { action?: string; effective_at?: string | null } | null;
           customer?: { email?: string };
           custom_data?: { userId?: string };
         };
@@ -392,30 +467,19 @@ app.post(
 
       let workspace: WorkspaceRecord | undefined;
       if (customUserId && /^[a-f0-9-]{36}$/i.test(customUserId)) {
-        workspace = billingStore.workspaces[customUserId];
-        if (!workspace) {
-          const now = new Date().toISOString();
-          workspace = {
-            id: customUserId,
-            trialUsed: 0,
-            isSubscribed: false,
-            planStatus: 'trial',
-            customerEmail: null,
-            paddleCustomerId: null,
-            paddleSubscriptionId: null,
-            lastTransactionId: null,
-            createdAt: now,
-            updatedAt: now,
-          };
-        }
+        workspace = billingStore.workspaces[customUserId]
+          ? normalizeWorkspaceRecord(customUserId, billingStore.workspaces[customUserId])
+          : normalizeWorkspaceRecord(customUserId);
       } else if (subscriptionId) {
-        workspace = Object.values(billingStore.workspaces).find(
+        const matched = Object.values(billingStore.workspaces).find(
           (w) => w.paddleSubscriptionId === subscriptionId
         );
+        if (matched) workspace = normalizeWorkspaceRecord(matched.id, matched);
       } else if (customerId) {
-        workspace = Object.values(billingStore.workspaces).find(
+        const matched = Object.values(billingStore.workspaces).find(
           (w) => w.paddleCustomerId === customerId
         );
+        if (matched) workspace = normalizeWorkspaceRecord(matched.id, matched);
       }
 
       if (workspace) {
@@ -423,6 +487,10 @@ app.post(
         if (customerId) workspace.paddleCustomerId = customerId;
         if (subscriptionId) workspace.paddleSubscriptionId = subscriptionId;
         if (data.customer?.email) workspace.customerEmail = data.customer.email;
+        if (data.next_billed_at !== undefined) workspace.nextBilledAt = data.next_billed_at;
+        if (data.scheduled_change?.action === 'cancel') {
+          workspace.cancelAt = data.scheduled_change.effective_at ?? null;
+        }
         if (eventType.startsWith('transaction.') && data.id) {
           workspace.lastTransactionId = data.id;
         }
@@ -430,6 +498,7 @@ app.post(
         if (eventType === 'subscription.canceled' || data.status === 'canceled') {
           workspace.isSubscribed = false;
           workspace.planStatus = 'canceled';
+          workspace.cancelAt = null;
         } else if (eventType === 'subscription.past_due' || data.status === 'past_due') {
           workspace.planStatus = 'past_due';
         } else if (
@@ -442,6 +511,9 @@ app.post(
         ) {
           workspace.isSubscribed = true;
           workspace.planStatus = 'active';
+          if (eventType === 'subscription.resumed') {
+            workspace.cancelAt = null;
+          }
         }
 
         workspace.updatedAt = now;
@@ -460,9 +532,119 @@ app.post(
 app.use(express.json({ limit: '10mb' }));
 
 // Billing Status Route
-app.get('/api/billing/status', (req: Request, res: Response) => {
+app.get('/api/billing/status', async (req: Request, res: Response) => {
   const { workspace, token } = getOrCreateWorkspace(req, res);
+  if (req.query.sync === '1' && workspace.paddleSubscriptionId && process.env.PADDLE_API_KEY) {
+    try {
+      await syncSubscriptionFromPaddle(workspace);
+    } catch {
+      // Return cached billing state if Paddle sync is temporarily unreachable
+    }
+  }
   res.json(formatBillingStatus(workspace, token));
+});
+
+// Update Workspace Billing Email
+app.patch('/api/billing/email', (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+  const { workspace, token } = getOrCreateWorkspace(req, res);
+  const { email } = req.body ?? {};
+  if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    return res.status(400).json({ error: 'Please enter a valid billing email address.' });
+  }
+  workspace.customerEmail = email.trim();
+  workspace.updatedAt = new Date().toISOString();
+  billingStore.workspaces[workspace.id] = workspace;
+  saveBillingStore();
+  return res.json({ billing: formatBillingStatus(workspace, token) });
+});
+
+// Sync Subscription Status & Management URLs from Paddle
+app.post('/api/billing/sync', async (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+  const { workspace, token } = getOrCreateWorkspace(req, res);
+  if (workspace.paddleSubscriptionId && process.env.PADDLE_API_KEY) {
+    try {
+      await syncSubscriptionFromPaddle(workspace);
+    } catch (err) {
+      console.error('[ViralFlow Billing] Paddle sync error:', err);
+      return res.status(502).json({
+        error: 'Unable to sync subscription status with Paddle right now.',
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+  }
+  return res.json({ billing: formatBillingStatus(workspace, token) });
+});
+
+// Cancel Subscription via Paddle Billing API
+app.post('/api/billing/cancel', async (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+  const { workspace, token } = getOrCreateWorkspace(req, res);
+  if (!workspace.isSubscribed) {
+    return res.status(400).json({ error: 'No active subscription to cancel.' });
+  }
+
+  const paddleApiKey = process.env.PADDLE_API_KEY;
+  if (!paddleApiKey || !workspace.paddleSubscriptionId) {
+    return res.status(400).json({
+      error:
+        'Configure PADDLE_API_KEY in Settings > Secrets and ensure a Paddle subscription ID is linked to cancel directly from the studio, or use the cancellation link in your Paddle receipt email.',
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+
+  const effectiveFrom =
+    req.body?.effectiveFrom === 'immediately' ? 'immediately' : 'next_billing_period';
+
+  try {
+    const cancelRes = await fetch(
+      `https://api.paddle.com/subscriptions/${encodeURIComponent(
+        workspace.paddleSubscriptionId
+      )}/cancel`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${paddleApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ effective_from: effectiveFrom }),
+      }
+    );
+
+    if (!cancelRes.ok) {
+      return res.status(502).json({
+        error: 'Paddle could not process the cancellation request. Try again or use your Paddle customer portal link.',
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+
+    await syncSubscriptionFromPaddle(workspace);
+    if (effectiveFrom === 'immediately') {
+      workspace.isSubscribed = false;
+      workspace.planStatus = 'canceled';
+      workspace.updatedAt = new Date().toISOString();
+      billingStore.workspaces[workspace.id] = workspace;
+      saveBillingStore();
+    }
+
+    return res.json({
+      canceled: true,
+      billing: formatBillingStatus(workspace, token),
+    });
+  } catch (err) {
+    console.error('[ViralFlow Billing] Cancel failed:', err);
+    return res.status(502).json({
+      error: 'Unable to contact Paddle to cancel subscription.',
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
 });
 
 // Client Checkout Confirmation Route (verifies transaction via Paddle API or webhook state)
@@ -506,7 +688,7 @@ app.post('/api/billing/confirm', async (req: Request, res: Response) => {
       confirmed: false,
       pending: true,
       error:
-        'Checkout completed. Add PADDLE_API_KEY or PADDLE_WEBHOOK_SECRET in Settings > Secrets so the server can verify your transaction and unlock unlimited access.',
+        'Checkout completed. Add PADDLE_API_KEY or PADDLE_WEBHOOK_SECRET in Settings > Secrets so the server can verify your transaction and unlock the app.',
       billing: formatBillingStatus(workspace, token),
     });
   }
@@ -561,6 +743,10 @@ app.post('/api/billing/confirm', async (req: Request, res: Response) => {
     workspace.updatedAt = new Date().toISOString();
     billingStore.workspaces[workspace.id] = workspace;
     saveBillingStore();
+
+    if (workspace.paddleSubscriptionId) {
+      await syncSubscriptionFromPaddle(workspace).catch(() => {});
+    }
 
     return res.json({
       confirmed: true,
@@ -640,7 +826,7 @@ function parseJsonSafe<T>(rawText: string | undefined, fallbackError: string): T
 }
 
 // 1. Viral Video Hooks Generator
-app.post('/api/generate/hooks', requireTrialOrSubscription, async (req: Request, res: Response) => {
+app.post('/api/generate/hooks', requireActiveSubscription, async (req: Request, res: Response) => {
   try {
     const { topic, platform, audience, tone, count = 6 } = req.body ?? {};
     if (!topic || typeof topic !== 'string' || !topic.trim()) {
@@ -712,7 +898,7 @@ Keep spoken lines natural, punchy, and under 18 words so a creator can deliver t
 });
 
 // 2. Video Script Writer
-app.post('/api/generate/script', requireTrialOrSubscription, async (req: Request, res: Response) => {
+app.post('/api/generate/script', requireActiveSubscription, async (req: Request, res: Response) => {
   try {
     const { topic, platform, durationSec = 45, tone, keyPoints } = req.body ?? {};
     if (!topic || typeof topic !== 'string' || !topic.trim()) {
@@ -787,7 +973,7 @@ Structure the script with exact timestamps (00:00, 00:03, etc.), a high-retentio
 });
 
 // 3. Captions & Hashtags Generator
-app.post('/api/generate/captions', requireTrialOrSubscription, async (req: Request, res: Response) => {
+app.post('/api/generate/captions', requireActiveSubscription, async (req: Request, res: Response) => {
   try {
     const { videoSummary, niche, goal, cta } = req.body ?? {};
     if (!videoSummary || typeof videoSummary !== 'string' || !videoSummary.trim()) {
@@ -861,7 +1047,7 @@ Rules:
 });
 
 // 4. Subtitle Generator (supports uploaded audio/video file OR pasted transcript/script)
-app.post('/api/generate/subtitles', requireTrialOrSubscription, upload.single('media'), async (req: Request, res: Response) => {
+app.post('/api/generate/subtitles', requireActiveSubscription, upload.single('media'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     const { transcriptText, durationSec = 45, maxWordsPerCue = 6, language = 'English' } = req.body ?? {};
@@ -991,7 +1177,7 @@ Requirements:
 });
 
 // 5. Long-to-Short Clip Repurposer (supports uploaded video/audio OR long-form transcript/outline)
-app.post('/api/generate/clips', requireTrialOrSubscription, upload.single('media'), async (req: Request, res: Response) => {
+app.post('/api/generate/clips', requireActiveSubscription, upload.single('media'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     const {

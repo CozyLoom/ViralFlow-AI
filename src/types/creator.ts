@@ -1,6 +1,13 @@
 export type Platform = 'TikTok' | 'Instagram Reels' | 'YouTube Shorts' | 'YouTube Long-Form';
 
-export type StudioModule = 'overview' | 'hooks' | 'scripts' | 'captions' | 'subtitles' | 'clips';
+export type StudioModule =
+  | 'overview'
+  | 'hooks'
+  | 'scripts'
+  | 'captions'
+  | 'subtitles'
+  | 'clips'
+  | 'subscription';
 
 export interface HookItem {
   id: string;
@@ -101,16 +108,25 @@ export interface SavedSessionItem {
   data: HooksResponse | VideoScriptResponse | CaptionsResponse | SubtitlesResponse | ClipsResponse;
 }
 
-export type PlanStatus = 'trial' | 'active' | 'past_due' | 'canceled';
+export type PlanStatus = 'inactive' | 'active' | 'past_due' | 'canceled';
+
+export interface BillingManagementUrls {
+  updatePaymentMethod?: string | null;
+  cancel?: string | null;
+}
 
 export interface BillingStatus {
   workspaceId: string;
-  trialLimit: number;
-  trialUsed: number;
-  trialRemaining: number | null;
   isSubscribed: boolean;
   planStatus: PlanStatus;
   customerEmail: string | null;
+  paddleCustomerId?: string | null;
+  paddleSubscriptionId?: string | null;
+  lastTransactionId?: string | null;
+  nextBilledAt?: string | null;
+  cancelAt?: string | null;
+  managementUrls?: BillingManagementUrls | null;
+  updatedAt?: string;
   token?: string;
 }
 
