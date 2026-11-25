@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import crypto from 'crypto';
+import http from 'http';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -285,12 +286,24 @@ function formatBillingStatus(workspace: WorkspaceRecord, token?: string) {
   };
 }
 
+function getPaddleApiBaseUrl(): string {
+  const apiKey = process.env.PADDLE_API_KEY || '';
+  if (
+    process.env.PADDLE_ENV === 'sandbox' ||
+    apiKey.includes('_sdbx_') ||
+    apiKey.startsWith('test_')
+  ) {
+    return 'https://sandbox-api.paddle.com';
+  }
+  return 'https://api.paddle.com';
+}
+
 async function syncSubscriptionFromPaddle(workspace: WorkspaceRecord): Promise<boolean> {
   const paddleApiKey = process.env.PADDLE_API_KEY;
   if (!paddleApiKey || !workspace.paddleSubscriptionId) return false;
 
   const subRes = await fetch(
-    `https://api.paddle.com/subscriptions/${encodeURIComponent(workspace.paddleSubscriptionId)}`,
+    `${getPaddleApiBaseUrl()}/subscriptions/${encodeURIComponent(workspace.paddleSubscriptionId)}`,
     {
       headers: {
         Authorization: `Bearer ${paddleApiKey}`,
@@ -605,7 +618,7 @@ app.post('/api/billing/cancel', async (req: Request, res: Response) => {
 
   try {
     const cancelRes = await fetch(
-      `https://api.paddle.com/subscriptions/${encodeURIComponent(
+      `${getPaddleApiBaseUrl()}/subscriptions/${encodeURIComponent(
         workspace.paddleSubscriptionId
       )}/cancel`,
       {
@@ -695,7 +708,7 @@ app.post('/api/billing/confirm', async (req: Request, res: Response) => {
 
   try {
     const paddleRes = await fetch(
-      `https://api.paddle.com/transactions/${encodeURIComponent(cleanTxnId)}`,
+      `${getPaddleApiBaseUrl()}/transactions/${encodeURIComponent(cleanTxnId)}`,
       {
         headers: {
           Authorization: `Bearer ${paddleApiKey}`,
@@ -1290,12 +1303,16 @@ app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
 });
 
 async function startServer() {
+  const httpServer = http.createServer(app);
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== 'true',
+        allowedHosts: true,
+        ws: { server: httpServer },
+        hmr: process.env.DISABLE_HMR !== 'true' ? { server: httpServer } : false,
       },
       appType: 'spa',
     });
@@ -1310,7 +1327,7 @@ async function startServer() {
     }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`ViralFlow AI server running on http://0.0.0.0:${PORT}`);
   });
 }

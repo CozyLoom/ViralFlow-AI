@@ -9,21 +9,30 @@ export interface PaddleCheckoutCompletedPayload {
   customerEmail?: string;
 }
 
+interface PaddleEventError {
+  type?: string;
+  code?: string;
+  detail?: string;
+  message?: string;
+}
+
 interface PaddleEvent {
   name?: string;
+  code?: string;
+  detail?: string;
   data?: {
     transaction_id?: string;
     customer?: {
       email?: string;
     };
   };
-  error?: {
-    detail?: string;
-    message?: string;
-  };
+  error?: PaddleEventError;
 }
 
 interface PaddleGlobal {
+  Environment?: {
+    set: (env: 'sandbox' | 'production') => void;
+  };
   Initialize: (options: {
     token: string;
     eventCallback?: (event: PaddleEvent) => void;
@@ -57,6 +66,30 @@ interface ActiveCheckoutHandlers {
 let initialized = false;
 let activeHandlers: ActiveCheckoutHandlers | null = null;
 
+function formatPaddleErrorMessage(event: PaddleEvent): string {
+  const code = event.error?.code || event.code || '';
+  const detail =
+    event.error?.detail ||
+    event.error?.message ||
+    event.detail ||
+    '';
+
+  if (
+    code === 'transaction_checkout_not_enabled' ||
+    detail.includes('transaction_checkout_not_enabled')
+  ) {
+    return 'Paddle checkouts are not enabled for this seller account yet (transaction_checkout_not_enabled). Complete your Paddle onboarding and domain approval in the Paddle Dashboard, or set sandbox VITE_PADDLE_CLIENT_TOKEN and VITE_PADDLE_PRICE_ID environment variables for testing.';
+  }
+
+  if (detail) {
+    return code ? `${detail} (${code})` : detail;
+  }
+  if (code) {
+    return `Paddle checkout error: ${code}. Verify your Paddle token, price ID, and domain approval.`;
+  }
+  return 'Checkout encountered an error. Please verify your Paddle configuration and try again.';
+}
+
 async function waitForPaddleSdk(timeoutMs = 3500): Promise<PaddleGlobal> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -86,6 +119,10 @@ export async function subscribeWithPaddle(params: {
   };
 
   if (!initialized) {
+    if (PADDLE_CLIENT_TOKEN.startsWith('test_') && paddle.Environment?.set) {
+      paddle.Environment.set('sandbox');
+    }
+
     paddle.Initialize({
       token: PADDLE_CLIENT_TOKEN,
       eventCallback: (event) => {
@@ -97,24 +134,26 @@ export async function subscribeWithPaddle(params: {
         } else if (event.name === 'checkout.closed') {
           activeHandlers.onClose?.();
         } else if (event.name === 'checkout.error') {
-          const detail =
-            event.error?.detail ||
-            event.error?.message ||
-            'Checkout encountered an error. Please try again.';
-          activeHandlers.onError?.(detail);
+          activeHandlers.onError?.(formatPaddleErrorMessage(event));
         }
       },
     });
     initialized = true;
   }
 
-  paddle.Checkout.open({
-    items: [{ priceId: PADDLE_PRICE_ID, quantity: 1 }],
-    customer: { email: params.email },
-    customData: { userId: params.workspaceId },
-    settings: {
-      displayMode: 'overlay',
-      theme: 'dark',
-    },
-  });
+  try {
+    paddle.Checkout.open({
+      items: [{ priceId: PADDLE_PRICE_ID, quantity: 1 }],
+      customer: { email: params.email },
+      customData: { userId: params.workspaceId },
+      settings: {
+        displayMode: 'overlay',
+        theme: 'dark',
+      },
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Unable to open Paddle checkout.';
+    activeHandlers.onError?.(message);
+  }
 }
