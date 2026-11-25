@@ -332,10 +332,14 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
   }
 
   const isSubscribed = Boolean(billing?.isSubscribed);
+  const freeLimit = billing?.freeLimit ?? 3;
+  const freeUsed = billing?.freeUsed ?? 0;
+  const freeRemaining = billing?.freeRemaining ?? freeLimit;
+  const inTrial = Boolean(billing && !isSubscribed && freeRemaining > 0);
   const nextBilledLabel = formatDateLabel(billing?.nextBilledAt);
   const cancelAtLabel = formatDateLabel(billing?.cancelAt);
 
-  // Blocked View: Payment required before app can be used
+  // Trial / Subscription Activation View
   if (!isSubscribed) {
     return (
       <div className="max-w-5xl mx-auto space-y-6">
@@ -350,38 +354,87 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-          {/* Left: Plan Details & What Unlocks */}
+          {/* Left: Trial Status, Plan Details & What Unlocks */}
           <section className="lg:col-span-7 rounded-2xl border border-white/10 bg-[#0D121C] p-7 sm:p-8 flex flex-col justify-between gap-8">
             <div className="space-y-5">
-              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-medium text-slate-400">
-                <span className="inline-flex items-center gap-1.5 text-amber-300">
-                  <Lock className="w-3.5 h-3.5" />
-                  App Locked
-                </span>
-                <span aria-hidden="true">·</span>
-                <span>Payment Required</span>
-                <span aria-hidden="true">·</span>
-                <span>
-                  {billing?.planStatus === 'canceled'
-                    ? 'Subscription Canceled'
-                    : billing?.planStatus === 'past_due'
-                    ? 'Payment Past Due'
-                    : 'No Active Plan'}
-                </span>
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-medium text-slate-400 tabular-nums">
+                {inTrial ? (
+                  <>
+                    <span className="inline-flex items-center gap-1.5 text-emerald-400">
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      Free Trial Active
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {freeRemaining} of {freeLimit} free generations left
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="inline-flex items-center gap-1.5 text-amber-300">
+                      <Lock className="w-3.5 h-3.5" />
+                      App Locked
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {freeUsed} / {freeLimit} Trial Used
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {billing?.planStatus === 'canceled'
+                        ? 'Subscription Canceled'
+                        : billing?.planStatus === 'past_due'
+                        ? 'Payment Past Due'
+                        : 'Subscription Required'}
+                    </span>
+                  </>
+                )}
               </div>
 
               <div className="space-y-2">
                 <h2 className="font-display text-3xl font-bold tracking-tight text-white">
-                  Activate ViralFlow Pro to unlock the studio
+                  {inTrial
+                    ? 'Try ViralFlow free, then activate Pro'
+                    : billing?.planStatus === 'canceled'
+                    ? 'Reactivate ViralFlow Pro to continue'
+                    : 'Your 3-generation free trial is complete'}
                 </h2>
                 <p className="text-sm sm:text-base text-slate-300 leading-relaxed">
-                  For active TikTok, Instagram &amp; YouTube creators. Complete payment through Paddle to unlock all five production suites immediately.
+                  {inTrial
+                    ? `You have ${freeRemaining} free studio ${
+                        freeRemaining === 1 ? 'generation' : 'generations'
+                      } remaining across all five creator tools. Activate ViralFlow Pro anytime for unlimited access.`
+                    : 'You have used all 3 free trial generations. Complete your Paddle subscription payment to unlock unlimited hooks, scripts, captions, subtitles, and short clips.'}
                 </p>
               </div>
 
+              {billing && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-400 tabular-nums">
+                    <span>Free trial usage</span>
+                    <span>
+                      {freeUsed} / {freeLimit} used
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {Array.from({ length: freeLimit }).map((_, idx) => {
+                      const used = idx < freeUsed;
+                      return (
+                        <div
+                          key={idx}
+                          className={`h-1.5 rounded-full ${
+                            used ? 'bg-amber-400' : 'bg-emerald-500/75'
+                          }`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div className="border-t border-white/10 pt-5 space-y-3">
                 <p className="text-xs font-semibold text-slate-400">
-                  Included with your subscription
+                  Included with ViralFlow Pro
                 </p>
                 <ul className="space-y-2.5 text-sm text-slate-200">
                   {INCLUDED_MODULES.map((item) => (
@@ -407,10 +460,12 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
             <div className="space-y-6">
               <div>
                 <h3 className="font-display text-xl font-semibold text-white">
-                  Complete Payment
+                  Activate Subscription
                 </h3>
                 <p className="text-sm text-slate-400 mt-1">
-                  Studio access opens automatically once your Paddle payment is confirmed.
+                  {inTrial
+                    ? 'Upgrade early or keep building with your remaining free runs.'
+                    : 'Unlimited studio access opens automatically once your Paddle payment is confirmed.'}
                 </p>
               </div>
 
@@ -463,8 +518,20 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
                     ? 'Verifying payment...'
                     : submitting
                     ? 'Opening Paddle checkout...'
+                    : inTrial
+                    ? 'Activate Pro Subscription'
                     : 'Subscribe & Unlock App'}
                 </button>
+
+                {inTrial && (
+                  <button
+                    type="button"
+                    onClick={onEnterStudio}
+                    className="w-full inline-flex items-center justify-center rounded-lg border border-white/10 bg-[#070A10] px-4 py-2.5 text-xs font-semibold text-slate-200 hover:bg-white/[0.06] transition-colors whitespace-nowrap shrink-0"
+                  >
+                    Continue Free Trial ({freeRemaining} left)
+                  </button>
+                )}
               </form>
             </div>
 

@@ -17,6 +17,7 @@ app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT) || 3000;
 
 const WORKSPACE_COOKIE_NAME = 'vf_workspace';
+const FREE_TRIAL_LIMIT = 3;
 const DATA_DIR = path.resolve(__dirname, '.data');
 const BILLING_STATE_FILE = path.join(DATA_DIR, 'billing-state.json');
 const BILLING_SECRET_FILE = path.join(DATA_DIR, 'billing-secret.key');
@@ -32,6 +33,7 @@ interface WorkspaceRecord {
   id: string;
   isSubscribed: boolean;
   planStatus: PlanStatus;
+  freeUsed: number;
   customerEmail: string | null;
   paddleCustomerId: string | null;
   paddleSubscriptionId: string | null;
@@ -293,10 +295,15 @@ function normalizeWorkspaceRecord(id: string, raw?: Partial<WorkspaceRecord>): W
     rawStatus === 'active' || rawStatus === 'past_due' || rawStatus === 'canceled'
       ? rawStatus
       : 'inactive';
+  const rawFreeUsed = Number(raw?.freeUsed);
+  const freeUsed = Number.isFinite(rawFreeUsed)
+    ? Math.min(FREE_TRIAL_LIMIT, Math.max(0, Math.floor(rawFreeUsed)))
+    : 0;
   return {
     id,
     isSubscribed: Boolean(raw?.isSubscribed),
     planStatus,
+    freeUsed,
     customerEmail: raw?.customerEmail ?? null,
     paddleCustomerId: raw?.paddleCustomerId ?? null,
     paddleSubscriptionId: raw?.paddleSubscriptionId ?? null,
@@ -346,10 +353,20 @@ function getOrCreateWorkspace(req: Request, res: Response): {
 }
 
 function formatBillingStatus(workspace: WorkspaceRecord, token?: string) {
+  const freeUsed = Math.min(FREE_TRIAL_LIMIT, Math.max(0, workspace.freeUsed || 0));
+  const freeRemaining = workspace.isSubscribed
+    ? FREE_TRIAL_LIMIT
+    : Math.max(0, FREE_TRIAL_LIMIT - freeUsed);
+  const canUseApp = workspace.isSubscribed || freeRemaining > 0;
+
   return {
     workspaceId: workspace.id,
     isSubscribed: workspace.isSubscribed,
     planStatus: workspace.planStatus,
+    freeLimit: FREE_TRIAL_LIMIT,
+    freeUsed,
+    freeRemaining,
+    canUseApp,
     customerEmail: workspace.customerEmail,
     paddleCustomerId: workspace.paddleCustomerId,
     paddleSubscriptionId: workspace.paddleSubscriptionId,
@@ -438,19 +455,42 @@ async function syncSubscriptionFromPaddle(workspace: WorkspaceRecord): Promise<b
   return true;
 }
 
+const inFlightTrialGenerations = new Map<string, number>();
+
 function requireActiveSubscription(req: Request, res: Response, next: NextFunction) {
   if (!verifySameOriginForCookieAuth(req)) {
     return res.status(403).json({ error: 'Invalid request origin.' });
   }
   const { workspace, token } = getOrCreateWorkspace(req, res);
+
   if (!workspace.isSubscribed) {
-    return res.status(402).json({
-      error:
-        'An active ViralFlow Pro subscription is required. Complete payment in the Subscription section to unlock the app.',
-      code: 'SUBSCRIPTION_REQUIRED',
-      billing: formatBillingStatus(workspace, token),
-    });
+    const activeReservations = inFlightTrialGenerations.get(workspace.id) || 0;
+    const effectiveUsed = Math.max(0, workspace.freeUsed || 0) + activeReservations;
+    if (effectiveUsed >= FREE_TRIAL_LIMIT) {
+      return res.status(402).json({
+        error:
+          'Your 3-generation free trial is complete. Subscribe to ViralFlow Pro in the Subscription section to continue.',
+        code: 'TRIAL_EXHAUSTED',
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+
+    inFlightTrialGenerations.set(workspace.id, activeReservations + 1);
+    let released = false;
+    const releaseReservation = () => {
+      if (released) return;
+      released = true;
+      const current = inFlightTrialGenerations.get(workspace.id) || 0;
+      if (current <= 1) {
+        inFlightTrialGenerations.delete(workspace.id);
+      } else {
+        inFlightTrialGenerations.set(workspace.id, current - 1);
+      }
+    };
+    res.once('finish', releaseReservation);
+    res.once('close', releaseReservation);
   }
+
   const authedReq = req as AuthenticatedRequest;
   authedReq.workspace = workspace;
   authedReq.workspaceToken = token;
@@ -462,6 +502,9 @@ function recordSuccessfulGeneration(req: Request) {
   const workspace = authedReq.workspace;
   if (!workspace) return undefined;
 
+  if (!workspace.isSubscribed) {
+    workspace.freeUsed = Math.min(FREE_TRIAL_LIMIT, (workspace.freeUsed || 0) + 1);
+  }
   workspace.updatedAt = new Date().toISOString();
   billingStore.workspaces[workspace.id] = workspace;
   saveBillingStore();

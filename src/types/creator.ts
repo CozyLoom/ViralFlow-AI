@@ -119,6 +119,10 @@ export interface BillingStatus {
   workspaceId: string;
   isSubscribed: boolean;
   planStatus: PlanStatus;
+  freeLimit: number;
+  freeUsed: number;
+  freeRemaining: number;
+  canUseApp: boolean;
   customerEmail: string | null;
   paddleCustomerId?: string | null;
   paddleSubscriptionId?: string | null;

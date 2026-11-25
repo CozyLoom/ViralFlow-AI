@@ -55,13 +55,14 @@ const NAV_ITEMS: Array<{
 ];
 
 export default function App() {
-  const [activeModule, setActiveModule] = useState<StudioModule>('subscription');
+  const [activeModule, setActiveModule] = useState<StudioModule>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
 
-  // Subscription billing state (blocks studio until payment succeeds)
+  // Free trial (3 generations) + Paddle subscription state
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [billingLoading, setBillingLoading] = useState(true);
+  const [backendUnavailable, setBackendUnavailable] = useState(false);
   const [blockedNotice, setBlockedNotice] = useState<string | null>(null);
 
   // Module results state
@@ -108,15 +109,19 @@ export default function App() {
         if (cancelled) return;
         if (status.token) setWorkspaceToken(status.token);
         setBilling(status);
-        if (status.isSubscribed) {
-          setActiveModule((prev) => (prev === 'subscription' ? 'overview' : prev));
+        setBackendUnavailable(false);
+        if (status.canUseApp) {
           setBlockedNotice(null);
         } else {
           setActiveModule('subscription');
+          setBlockedNotice(
+            'Your 3-generation free trial is complete. Complete payment below to activate ViralFlow Pro.'
+          );
         }
       })
       .catch(() => {
         if (cancelled) return;
+        setBackendUnavailable(true);
         setActiveModule('subscription');
         setBlockedNotice(
           'Subscription verification requires the live studio backend server. Complete payment once connected to unlock the app.'
@@ -130,26 +135,34 @@ export default function App() {
     };
   }, []);
 
-  const isAppUnlocked = Boolean(billing?.isSubscribed);
+  const isSubscribed = Boolean(billing?.isSubscribed);
+  const freeLimit = billing?.freeLimit ?? 3;
+  const freeUsed = billing?.freeUsed ?? 0;
+  const freeRemaining = billing?.freeRemaining ?? freeLimit;
+  const isAppUnlocked = billing ? Boolean(billing.canUseApp) : !backendUnavailable;
 
   const handleBillingUpdate = (next: BillingStatus) => {
     if (next.token) setWorkspaceToken(next.token);
     const wasSubscribed = Boolean(billing?.isSubscribed);
     setBilling(next);
-    if (next.isSubscribed) {
+    setBackendUnavailable(false);
+    if (!next.canUseApp) {
+      setBlockedNotice(
+        'Your 3-generation free trial is complete. Complete payment below to activate ViralFlow Pro.'
+      );
+      setActiveModule('subscription');
+    } else {
       setBlockedNotice(null);
-      if (!wasSubscribed) {
+      if (next.isSubscribed && !wasSubscribed) {
         setActiveModule('overview');
       }
-    } else {
-      setActiveModule('subscription');
     }
   };
 
   const navigateToModule = (target: StudioModule) => {
     if (!isAppUnlocked && target !== 'subscription') {
       setBlockedNotice(
-        'Studio tools are locked until your Subscription payment is completed successfully.'
+        'Your 3-generation free trial has ended. Complete payment below to activate ViralFlow Pro.'
       );
       setActiveModule('subscription');
       setMobileMenuOpen(false);
@@ -162,7 +175,7 @@ export default function App() {
 
   const handleRequireSubscription = () => {
     setBlockedNotice(
-      'Active ViralFlow Pro subscription required. Complete payment below to unlock the studio.'
+      'Your 3-generation free trial is complete. Activate ViralFlow Pro below to keep generating.'
     );
     setActiveModule('subscription');
     setMobileMenuOpen(false);
@@ -349,23 +362,44 @@ export default function App() {
 
       {/* Creator Workspace Footer */}
       <div className="p-4 border-t border-white/10 space-y-3 shrink-0">
-        <div className="flex items-center justify-between gap-2 text-xs">
-          {isAppUnlocked ? (
-            <span className="font-medium text-emerald-400 truncate">
-              Subscription · Active
-            </span>
-          ) : (
-            <span className="font-medium text-amber-300 truncate">
-              Subscription · Locked
-            </span>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            {isSubscribed ? (
+              <span className="font-medium text-emerald-400 truncate">
+                Subscription · Active
+              </span>
+            ) : freeRemaining > 0 && !backendUnavailable ? (
+              <span className="font-medium text-slate-200 truncate tabular-nums">
+                Free Trial · {freeRemaining} of {freeLimit} left
+              </span>
+            ) : (
+              <span className="font-medium text-amber-300 truncate">
+                Trial Ended · Locked
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => navigateToModule('subscription')}
+              className="font-semibold text-rose-400 hover:text-rose-300 transition-colors whitespace-nowrap shrink-0"
+            >
+              {isSubscribed ? 'Manage' : freeRemaining > 0 && !backendUnavailable ? 'Activate' : 'Unlock'}
+            </button>
+          </div>
+          {!isSubscribed && !backendUnavailable && (
+            <div className="grid grid-cols-3 gap-1" aria-label={`${freeUsed} of ${freeLimit} free trials used`}>
+              {Array.from({ length: freeLimit }).map((_, idx) => {
+                const isRemaining = idx < freeRemaining;
+                return (
+                  <div
+                    key={idx}
+                    className={`h-1 rounded-full ${
+                      isRemaining ? 'bg-rose-500' : 'bg-slate-800'
+                    }`}
+                  />
+                );
+              })}
+            </div>
           )}
-          <button
-            type="button"
-            onClick={() => navigateToModule('subscription')}
-            className="font-semibold text-rose-400 hover:text-rose-300 transition-colors whitespace-nowrap shrink-0"
-          >
-            {isAppUnlocked ? 'Manage' : 'Unlock'}
-          </button>
         </div>
         <PWAInstallButton />
         <div className="flex items-center gap-3">
@@ -444,28 +478,41 @@ export default function App() {
 
           <div className="flex items-center gap-4 shrink-0">
             {isAppUnlocked ? (
-              effectiveModule === 'subscription' ? (
-                <button
-                  type="button"
-                  onClick={() => navigateToModule('overview')}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0"
-                >
-                  Open Studio
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleResetActiveDraft}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  {effectiveModule === 'overview' ? 'New Project' : 'New Draft'}
-                </button>
-              )
+              <>
+                {!isSubscribed && (
+                  <button
+                    type="button"
+                    onClick={() => navigateToModule('subscription')}
+                    className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium text-slate-300 hover:text-white transition-colors tabular-nums whitespace-nowrap shrink-0"
+                  >
+                    <span>
+                      Trial: {freeRemaining}/{freeLimit} left
+                    </span>
+                  </button>
+                )}
+                {effectiveModule === 'subscription' ? (
+                  <button
+                    type="button"
+                    onClick={() => navigateToModule('overview')}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0"
+                  >
+                    Open Studio
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleResetActiveDraft}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-500 transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    {effectiveModule === 'overview' ? 'New Project' : 'New Draft'}
+                  </button>
+                )}
+              </>
             ) : (
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-300 whitespace-nowrap shrink-0">
                 <Lock className="w-3.5 h-3.5" />
-                Payment Required
+                Subscription Required
               </span>
             )}
           </div>
