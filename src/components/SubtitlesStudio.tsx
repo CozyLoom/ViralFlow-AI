@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Download, Play, Pause, Loader2, Trash2, Video } from 'lucide-react';
-import { SubtitleCue, SubtitlesResponse } from '../types/creator';
+import { BillingStatus, SubtitleCue, SubtitlesResponse } from '../types/creator';
 import {
   buildSrtContent,
   buildVttContent,
   downloadTextFile,
   formatMinutesSeconds,
 } from '../utils/exportHelpers';
-import { parseApiJson } from '../utils/api';
+import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
 import creatorReelImg from '../assets/images/creator_reel_studio_1795500269560.jpg';
 import overheadRigImg from '../assets/images/overhead_rig_reel_1795500269759.jpg';
 import studioPreviewFrameImg from '../assets/images/studio_preview_frame_1795421850856.jpg';
@@ -17,6 +17,8 @@ interface SubtitlesStudioProps {
   initialDurationSec?: number;
   result: SubtitlesResponse | null;
   onResult: (data: SubtitlesResponse, title: string, platform: string) => void;
+  onBillingUpdate?: (billing: BillingStatus) => void;
+  onRequireUpgrade?: () => void;
 }
 
 type InputMode = 'upload' | 'transcript';
@@ -27,6 +29,8 @@ export const SubtitlesStudio: React.FC<SubtitlesStudioProps> = ({
   initialDurationSec = 45,
   result,
   onResult,
+  onBillingUpdate,
+  onRequireUpgrade,
 }) => {
   const [inputMode, setInputMode] = useState<InputMode>(initialTranscript ? 'transcript' : 'upload');
   const [mediaFile, setMediaFile] = useState<File | null>(null);
@@ -142,17 +146,23 @@ export const SubtitlesStudio: React.FC<SubtitlesStudioProps> = ({
         formData.append('language', language);
         res = await fetch('/api/generate/subtitles', {
           method: 'POST',
+          headers: getAuthHeaders(),
           body: formData,
         });
       } else {
         res = await fetch('/api/generate/subtitles', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ transcriptText, durationSec, maxWordsPerCue, language }),
         });
       }
 
-      const typed = await parseApiJson<SubtitlesResponse>(res, 'Failed to generate subtitles.');
+      const raw = await parseApiJson<SubtitlesResponse & { billing?: BillingStatus }>(
+        res,
+        'Failed to generate subtitles.'
+      );
+      const { billing, ...typed } = raw;
+      if (billing) onBillingUpdate?.(billing);
       setCues(typed.cues);
       setCurrentTime(0);
       onResult(
@@ -161,6 +171,12 @@ export const SubtitlesStudio: React.FC<SubtitlesStudioProps> = ({
         `${typed.detectedLanguage} · ${typed.cues.length} cues`
       );
     } catch (err) {
+      if (err instanceof ApiRequestError) {
+        if (err.billing) onBillingUpdate?.(err.billing);
+        if (err.status === 402 || err.code === 'TRIAL_EXHAUSTED') {
+          onRequireUpgrade?.();
+        }
+      }
       setError(err instanceof Error ? err.message : 'Subtitle generation failed.');
     } finally {
       setLoading(false);

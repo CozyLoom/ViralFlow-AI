@@ -100,3 +100,17 @@ export interface SavedSessionItem {
   createdAt: string;
   data: HooksResponse | VideoScriptResponse | CaptionsResponse | SubtitlesResponse | ClipsResponse;
 }
+
+export type PlanStatus = 'trial' | 'active' | 'past_due' | 'canceled';
+
+export interface BillingStatus {
+  workspaceId: string;
+  trialLimit: number;
+  trialUsed: number;
+  trialRemaining: number | null;
+  isSubscribed: boolean;
+  planStatus: PlanStatus;
+  customerEmail: string | null;
+  token?: string;
+}
+

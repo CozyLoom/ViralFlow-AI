@@ -12,6 +12,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
+  BillingStatus,
   CaptionsResponse,
   ClipsResponse,
   HookItem,
@@ -30,6 +31,8 @@ import { SubtitlesStudio } from './components/SubtitlesStudio';
 import { ClipsStudio } from './components/ClipsStudio';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { SubscriptionModal } from './components/SubscriptionModal';
+import { getAuthHeaders, parseApiJson, setWorkspaceToken } from './utils/api';
 import creatorAvatarImg from './assets/images/creator_avatar_1795421850716.jpg';
 
 const STORAGE_KEY = 'viralflow_session_history_v1';
@@ -52,6 +55,11 @@ export default function App() {
   const [activeModule, setActiveModule] = useState<StudioModule>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
+
+  // Trial & subscription billing state
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [subscriptionModalOpen, setSubscriptionModalOpen] = useState(false);
+  const [subscriptionModalReason, setSubscriptionModalReason] = useState<'upgrade' | 'exhausted'>('upgrade');
 
   // Module results state
   const [hooksResult, setHooksResult] = useState<HooksResponse | null>(null);
@@ -87,6 +95,34 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [history]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/billing/status', { headers: getAuthHeaders() })
+      .then((res) => parseApiJson<BillingStatus>(res, 'Unable to load plan status.'))
+      .then((status) => {
+        if (cancelled) return;
+        if (status.token) setWorkspaceToken(status.token);
+        setBilling(status);
+      })
+      .catch(() => {
+        // Static hosting or offline mode: keep UI usable without blocking
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleBillingUpdate = (next: BillingStatus) => {
+    if (next.token) setWorkspaceToken(next.token);
+    setBilling(next);
+  };
+
+  const openSubscriptionModal = (reason: 'upgrade' | 'exhausted' = 'upgrade') => {
+    setSubscriptionModalReason(reason);
+    setSubscriptionModalOpen(true);
+    setMobileMenuOpen(false);
+  };
 
   const recordHistory = (
     module: StudioModule,
@@ -255,6 +291,26 @@ export default function App() {
 
       {/* Creator Workspace Footer */}
       <div className="p-4 border-t border-white/10 space-y-3 shrink-0">
+        <div className="flex items-center justify-between gap-2 text-xs tabular-nums">
+          {billing?.isSubscribed ? (
+            <span className="font-medium text-emerald-400 truncate">
+              Pro Plan · Unlimited
+            </span>
+          ) : (
+            <span className="text-slate-300 truncate">
+              Free Trial · {billing ? billing.trialRemaining ?? 0 : 3} of {billing?.trialLimit ?? 3} left
+            </span>
+          )}
+          {!billing?.isSubscribed && (
+            <button
+              type="button"
+              onClick={() => openSubscriptionModal('upgrade')}
+              className="font-semibold text-rose-400 hover:text-rose-300 transition-colors whitespace-nowrap shrink-0"
+            >
+              Upgrade
+            </button>
+          )}
+        </div>
         <PWAInstallButton />
         <div className="flex items-center gap-3">
           {!avatarError ? (
@@ -330,7 +386,21 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-4 shrink-0">
+            {billing?.isSubscribed ? (
+              <span className="hidden sm:inline text-xs font-medium text-emerald-400 whitespace-nowrap shrink-0">
+                Pro Active
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => openSubscriptionModal('upgrade')}
+                className="text-xs font-medium text-slate-300 hover:text-white transition-colors whitespace-nowrap shrink-0 tabular-nums"
+              >
+                Trial: {billing ? billing.trialRemaining ?? 0 : 3}/{billing?.trialLimit ?? 3} left ·{' '}
+                <span className="text-rose-400 font-semibold">Upgrade</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handleResetActiveDraft}
@@ -364,6 +434,8 @@ export default function App() {
                 setHooksResult(data);
                 recordHistory('hooks', title, platform, data);
               }}
+              onBillingUpdate={handleBillingUpdate}
+              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
               onSendToScript={(hook: HookItem, topic: string, platform: Platform) => {
                 setScriptDraftTopic(topic);
                 setScriptDraftPlatform(platform);
@@ -385,6 +457,8 @@ export default function App() {
                 setScriptResult(data);
                 recordHistory('scripts', title, platform, data);
               }}
+              onBillingUpdate={handleBillingUpdate}
+              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
               onSendToCaptions={(summary) => {
                 setCaptionDraftSummary(summary);
                 setActiveModule('captions');
@@ -405,6 +479,8 @@ export default function App() {
                 setCaptionsResult(data);
                 recordHistory('captions', title, platform, data);
               }}
+              onBillingUpdate={handleBillingUpdate}
+              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
             />
           )}
 
@@ -417,6 +493,8 @@ export default function App() {
                 setSubtitlesResult(data);
                 recordHistory('subtitles', title, platform, data);
               }}
+              onBillingUpdate={handleBillingUpdate}
+              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
             />
           )}
 
@@ -427,6 +505,8 @@ export default function App() {
                 setClipsResult(data);
                 recordHistory('clips', title, platform, data);
               }}
+              onBillingUpdate={handleBillingUpdate}
+              onRequireUpgrade={() => openSubscriptionModal('exhausted')}
               onSendToCaptions={(summary) => {
                 setCaptionDraftSummary(summary);
                 setActiveModule('captions');
@@ -435,6 +515,14 @@ export default function App() {
           )}
         </main>
       </div>
+
+      <SubscriptionModal
+        open={subscriptionModalOpen}
+        reason={subscriptionModalReason}
+        billing={billing}
+        onClose={() => setSubscriptionModalOpen(false)}
+        onBillingUpdate={handleBillingUpdate}
+      />
     </div>
   );
 }

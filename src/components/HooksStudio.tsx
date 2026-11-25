@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Copy, Check, ArrowRight, Loader2, RotateCcw } from 'lucide-react';
-import { HookItem, HooksResponse, Platform } from '../types/creator';
-import { parseApiJson } from '../utils/api';
+import { BillingStatus, HookItem, HooksResponse, Platform } from '../types/creator';
+import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
 
 interface HooksStudioProps {
   initialTopic?: string;
@@ -9,6 +9,8 @@ interface HooksStudioProps {
   result: HooksResponse | null;
   onResult: (data: HooksResponse, title: string, platform: string) => void;
   onSendToScript: (hook: HookItem, topic: string, platform: Platform) => void;
+  onBillingUpdate?: (billing: BillingStatus) => void;
+  onRequireUpgrade?: () => void;
 }
 
 const HOOK_PRESETS = [
@@ -40,6 +42,8 @@ export const HooksStudio: React.FC<HooksStudioProps> = ({
   result,
   onResult,
   onSendToScript,
+  onBillingUpdate,
+  onRequireUpgrade,
 }) => {
   const [topic, setTopic] = useState(initialTopic);
   const [platform, setPlatform] = useState<Platform>(initialPlatform);
@@ -70,12 +74,23 @@ export const HooksStudio: React.FC<HooksStudioProps> = ({
     try {
       const res = await fetch('/api/generate/hooks', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ topic, platform, audience, tone, count }),
       });
-      const data = await parseApiJson<HooksResponse>(res, 'Failed to generate hooks.');
+      const raw = await parseApiJson<HooksResponse & { billing?: BillingStatus }>(
+        res,
+        'Failed to generate hooks.'
+      );
+      const { billing, ...data } = raw;
+      if (billing) onBillingUpdate?.(billing);
       onResult(data, topic.trim().slice(0, 48), platform);
     } catch (err) {
+      if (err instanceof ApiRequestError) {
+        if (err.billing) onBillingUpdate?.(err.billing);
+        if (err.status === 402 || err.code === 'TRIAL_EXHAUSTED') {
+          onRequireUpgrade?.();
+        }
+      }
       setError(err instanceof Error ? err.message : 'Unable to reach generation service.');
     } finally {
       setLoading(false);

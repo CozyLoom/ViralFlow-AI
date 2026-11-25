@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Copy, Check, Loader2, Play, Pause, ArrowRight, Download } from 'lucide-react';
-import { Platform, VideoScriptResponse } from '../types/creator';
+import { BillingStatus, Platform, VideoScriptResponse } from '../types/creator';
 import {
   downloadTextFile,
   formatMinutesSeconds,
   formatScriptForClipboard,
 } from '../utils/exportHelpers';
-import { parseApiJson } from '../utils/api';
+import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
 
 interface ScriptsStudioProps {
   initialTopic?: string;
@@ -16,6 +16,8 @@ interface ScriptsStudioProps {
   onResult: (data: VideoScriptResponse, title: string, platform: string) => void;
   onSendToCaptions: (summary: string) => void;
   onSendToSubtitles: (transcript: string, durationSec: number) => void;
+  onBillingUpdate?: (billing: BillingStatus) => void;
+  onRequireUpgrade?: () => void;
 }
 
 const DURATIONS = [
@@ -34,6 +36,8 @@ export const ScriptsStudio: React.FC<ScriptsStudioProps> = ({
   onResult,
   onSendToCaptions,
   onSendToSubtitles,
+  onBillingUpdate,
+  onRequireUpgrade,
 }) => {
   const [topic, setTopic] = useState(initialTopic);
   const [platform, setPlatform] = useState<Platform>(initialPlatform);
@@ -85,12 +89,23 @@ export const ScriptsStudio: React.FC<ScriptsStudioProps> = ({
     try {
       const res = await fetch('/api/generate/script', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ topic, platform, durationSec, tone, keyPoints }),
       });
-      const data = await parseApiJson<VideoScriptResponse>(res, 'Failed to write video script.');
+      const raw = await parseApiJson<VideoScriptResponse & { billing?: BillingStatus }>(
+        res,
+        'Failed to write video script.'
+      );
+      const { billing, ...data } = raw;
+      if (billing) onBillingUpdate?.(billing);
       onResult(data, data.title || topic.trim(), platform);
     } catch (err) {
+      if (err instanceof ApiRequestError) {
+        if (err.billing) onBillingUpdate?.(err.billing);
+        if (err.status === 402 || err.code === 'TRIAL_EXHAUSTED') {
+          onRequireUpgrade?.();
+        }
+      }
       setError(err instanceof Error ? err.message : 'Unable to generate script.');
     } finally {
       setLoading(false);

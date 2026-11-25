@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { Copy, Check, Loader2 } from 'lucide-react';
-import { CaptionsResponse } from '../types/creator';
-import { parseApiJson } from '../utils/api';
+import { BillingStatus, CaptionsResponse } from '../types/creator';
+import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
 
 interface CaptionsStudioProps {
   initialSummary?: string;
   result: CaptionsResponse | null;
   onResult: (data: CaptionsResponse, title: string, platform: string) => void;
+  onBillingUpdate?: (billing: BillingStatus) => void;
+  onRequireUpgrade?: () => void;
 }
 
 type CaptionTab = 'tiktok' | 'instagram' | 'youtube';
@@ -15,6 +17,8 @@ export const CaptionsStudio: React.FC<CaptionsStudioProps> = ({
   initialSummary = '',
   result,
   onResult,
+  onBillingUpdate,
+  onRequireUpgrade,
 }) => {
   const [videoSummary, setVideoSummary] = useState(initialSummary);
   const [niche, setNiche] = useState('');
@@ -41,16 +45,27 @@ export const CaptionsStudio: React.FC<CaptionsStudioProps> = ({
     try {
       const res = await fetch('/api/generate/captions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ videoSummary, niche, goal, cta }),
       });
-      const data = await parseApiJson<CaptionsResponse>(res, 'Failed to generate captions.');
+      const raw = await parseApiJson<CaptionsResponse & { billing?: BillingStatus }>(
+        res,
+        'Failed to generate captions.'
+      );
+      const { billing, ...data } = raw;
+      if (billing) onBillingUpdate?.(billing);
       onResult(
         data,
         videoSummary.trim().slice(0, 48),
         'TikTok · Instagram · YouTube'
       );
     } catch (err) {
+      if (err instanceof ApiRequestError) {
+        if (err.billing) onBillingUpdate?.(err.billing);
+        if (err.status === 402 || err.code === 'TRIAL_EXHAUSTED') {
+          onRequireUpgrade?.();
+        }
+      }
       setError(err instanceof Error ? err.message : 'Unable to generate captions.');
     } finally {
       setLoading(false);

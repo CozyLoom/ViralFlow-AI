@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Download, Play, Pause, Loader2, Trash2, ArrowRight, Film } from 'lucide-react';
-import { ClipsResponse, ShortClipSegment } from '../types/creator';
+import { BillingStatus, ClipsResponse, ShortClipSegment } from '../types/creator';
 import {
   downloadTextFile,
   formatClipsBrief,
   formatMinutesSeconds,
 } from '../utils/exportHelpers';
-import { parseApiJson } from '../utils/api';
+import { ApiRequestError, getAuthHeaders, parseApiJson } from '../utils/api';
 import creatorReelImg from '../assets/images/creator_reel_studio_1795500269560.jpg';
 import overheadRigImg from '../assets/images/overhead_rig_reel_1795500269759.jpg';
 import studioPreviewFrameImg from '../assets/images/studio_preview_frame_1795421850856.jpg';
@@ -15,6 +15,8 @@ interface ClipsStudioProps {
   result: ClipsResponse | null;
   onResult: (data: ClipsResponse, title: string, platform: string) => void;
   onSendToCaptions: (summary: string) => void;
+  onBillingUpdate?: (billing: BillingStatus) => void;
+  onRequireUpgrade?: () => void;
 }
 
 type ClipInputMode = 'transcript' | 'upload';
@@ -30,6 +32,8 @@ export const ClipsStudio: React.FC<ClipsStudioProps> = ({
   result,
   onResult,
   onSendToCaptions,
+  onBillingUpdate,
+  onRequireUpgrade,
 }) => {
   const [inputMode, setInputMode] = useState<ClipInputMode>('transcript');
   const [mediaFile, setMediaFile] = useState<File | null>(null);
@@ -112,12 +116,13 @@ export const ClipsStudio: React.FC<ClipsStudioProps> = ({
         formData.append('targetClipCount', String(targetClipCount));
         res = await fetch('/api/generate/clips', {
           method: 'POST',
+          headers: getAuthHeaders(),
           body: formData,
         });
       } else {
         res = await fetch('/api/generate/clips', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             sourceText,
             totalDurationMinutes,
@@ -126,7 +131,12 @@ export const ClipsStudio: React.FC<ClipsStudioProps> = ({
         });
       }
 
-      const typed = await parseApiJson<ClipsResponse>(res, 'Failed to extract short clips.');
+      const raw = await parseApiJson<ClipsResponse & { billing?: BillingStatus }>(
+        res,
+        'Failed to extract short clips.'
+      );
+      const { billing, ...typed } = raw;
+      if (billing) onBillingUpdate?.(billing);
       if (typed.clips.length > 0) {
         setSelectedClipId(typed.clips[0].id);
       }
@@ -136,6 +146,12 @@ export const ClipsStudio: React.FC<ClipsStudioProps> = ({
         `${typed.clips.length} short clips`
       );
     } catch (err) {
+      if (err instanceof ApiRequestError) {
+        if (err.billing) onBillingUpdate?.(err.billing);
+        if (err.status === 402 || err.code === 'TRIAL_EXHAUSTED') {
+          onRequireUpgrade?.();
+        }
+      }
       setError(err instanceof Error ? err.message : 'Clip extraction failed.');
     } finally {
       setLoading(false);

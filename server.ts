@@ -6,6 +6,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +14,566 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+const TRIAL_LIMIT = 3;
+const WORKSPACE_COOKIE_NAME = 'vf_workspace';
+const DATA_DIR = path.resolve(__dirname, '.data');
+const BILLING_STATE_FILE = path.join(DATA_DIR, 'billing-state.json');
+const BILLING_SECRET_FILE = path.join(DATA_DIR, 'billing-secret.key');
+
+type PlanStatus = 'trial' | 'active' | 'past_due' | 'canceled';
+
+interface WorkspaceRecord {
+  id: string;
+  trialUsed: number;
+  isSubscribed: boolean;
+  planStatus: PlanStatus;
+  customerEmail: string | null;
+  paddleCustomerId: string | null;
+  paddleSubscriptionId: string | null;
+  lastTransactionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface BillingStoreFile {
+  workspaces: Record<string, WorkspaceRecord>;
+}
+
+interface AuthenticatedRequest extends Request {
+  workspace?: WorkspaceRecord;
+  workspaceToken?: string;
+}
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  }
+}
+
+let cachedSecret: string | null = null;
+function getSigningSecret(): string {
+  if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16) {
+    return process.env.SESSION_SECRET;
+  }
+  if (cachedSecret) return cachedSecret;
+
+  try {
+    ensureDataDir();
+    if (fs.existsSync(BILLING_SECRET_FILE)) {
+      const existing = fs.readFileSync(BILLING_SECRET_FILE, 'utf8').trim();
+      if (existing.length >= 32) {
+        cachedSecret = existing;
+        return cachedSecret;
+      }
+    }
+    const generated = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(BILLING_SECRET_FILE, generated, { mode: 0o600 });
+    cachedSecret = generated;
+    return cachedSecret;
+  } catch {
+    cachedSecret = crypto.randomBytes(32).toString('hex');
+    return cachedSecret;
+  }
+}
+
+let billingStore: BillingStoreFile = { workspaces: {} };
+
+function loadBillingStore() {
+  try {
+    if (fs.existsSync(BILLING_STATE_FILE)) {
+      const raw = fs.readFileSync(BILLING_STATE_FILE, 'utf8');
+      const parsed = JSON.parse(raw) as BillingStoreFile;
+      if (parsed && parsed.workspaces && typeof parsed.workspaces === 'object') {
+        billingStore = parsed;
+      }
+    }
+  } catch (err) {
+    console.error('[ViralFlow Billing] Failed to load billing store:', err);
+  }
+}
+
+function saveBillingStore() {
+  try {
+    ensureDataDir();
+    const tmpFile = `${BILLING_STATE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(billingStore, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpFile, BILLING_STATE_FILE);
+  } catch (err) {
+    console.error('[ViralFlow Billing] Failed to persist billing store:', err);
+  }
+}
+
+loadBillingStore();
+
+function signWorkspaceId(workspaceId: string): string {
+  const sig = crypto
+    .createHmac('sha256', getSigningSecret())
+    .update(workspaceId)
+    .digest('base64url');
+  return `${workspaceId}.${sig}`;
+}
+
+function verifyWorkspaceToken(token: string | undefined): string | null {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [workspaceId, sig] = parts;
+  if (!/^[a-f0-9-]{36}$/i.test(workspaceId) || !sig) return null;
+
+  const expectedSig = crypto
+    .createHmac('sha256', getSigningSecret())
+    .update(workspaceId)
+    .digest('base64url');
+
+  const actualBuf = Buffer.from(sig, 'utf8');
+  const expectedBuf = Buffer.from(expectedSig, 'utf8');
+  if (actualBuf.length !== expectedBuf.length) return null;
+  if (!crypto.timingSafeEqual(actualBuf, expectedBuf)) return null;
+  return workspaceId;
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!header) return cookies;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (key) {
+      try {
+        cookies[key] = decodeURIComponent(value);
+      } catch {
+        cookies[key] = value;
+      }
+    }
+  }
+  return cookies;
+}
+
+function setWorkspaceCookie(req: Request, res: Response, token: string) {
+  const isHttps =
+    req.secure ||
+    req.headers['x-forwarded-proto'] === 'https' ||
+    (typeof req.headers.origin === 'string' && req.headers.origin.startsWith('https://'));
+
+  const parts = [
+    `${WORKSPACE_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'Max-Age=31536000',
+  ];
+
+  if (isHttps) {
+    parts.push('SameSite=None', 'Secure', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function verifySameOriginForCookieAuth(req: Request): boolean {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return true;
+  }
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    const originHost = new URL(origin).host;
+    const forwardedHost =
+      typeof req.headers['x-forwarded-host'] === 'string'
+        ? req.headers['x-forwarded-host'].split(',')[0].trim()
+        : undefined;
+    const expectedHost = forwardedHost || req.headers.host;
+    return !expectedHost || originHost === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
+function getOrCreateWorkspace(req: Request, res: Response): {
+  workspace: WorkspaceRecord;
+  token: string;
+} {
+  const authHeader = req.headers.authorization;
+  const bearerToken =
+    authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined;
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieToken = cookies[WORKSPACE_COOKIE_NAME];
+
+  const verifiedId =
+    verifyWorkspaceToken(bearerToken) || verifyWorkspaceToken(cookieToken);
+
+  if (verifiedId) {
+    let existing = billingStore.workspaces[verifiedId];
+    if (!existing) {
+      const now = new Date().toISOString();
+      existing = {
+        id: verifiedId,
+        trialUsed: 0,
+        isSubscribed: false,
+        planStatus: 'trial',
+        customerEmail: null,
+        paddleCustomerId: null,
+        paddleSubscriptionId: null,
+        lastTransactionId: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      billingStore.workspaces[verifiedId] = existing;
+      saveBillingStore();
+    }
+    const token = signWorkspaceId(existing.id);
+    if (!cookieToken || verifyWorkspaceToken(cookieToken) !== existing.id) {
+      setWorkspaceCookie(req, res, token);
+    }
+    return { workspace: existing, token };
+  }
+
+  const newId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const created: WorkspaceRecord = {
+    id: newId,
+    trialUsed: 0,
+    isSubscribed: false,
+    planStatus: 'trial',
+    customerEmail: null,
+    paddleCustomerId: null,
+    paddleSubscriptionId: null,
+    lastTransactionId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  billingStore.workspaces[newId] = created;
+  saveBillingStore();
+  const token = signWorkspaceId(newId);
+  setWorkspaceCookie(req, res, token);
+  return { workspace: created, token };
+}
+
+function formatBillingStatus(workspace: WorkspaceRecord, token?: string) {
+  return {
+    workspaceId: workspace.id,
+    trialLimit: TRIAL_LIMIT,
+    trialUsed: workspace.trialUsed,
+    trialRemaining: workspace.isSubscribed
+      ? null
+      : Math.max(0, TRIAL_LIMIT - workspace.trialUsed),
+    isSubscribed: workspace.isSubscribed,
+    planStatus: workspace.planStatus,
+    customerEmail: workspace.customerEmail,
+    ...(token ? { token } : {}),
+  };
+}
+
+function requireTrialOrSubscription(req: Request, res: Response, next: NextFunction) {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+  const { workspace, token } = getOrCreateWorkspace(req, res);
+  if (!workspace.isSubscribed && workspace.trialUsed >= TRIAL_LIMIT) {
+    return res.status(402).json({
+      error:
+        'Your 3 free studio generations have been used. Subscribe to ViralFlow Pro to continue generating.',
+      code: 'TRIAL_EXHAUSTED',
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+  const authedReq = req as AuthenticatedRequest;
+  authedReq.workspace = workspace;
+  authedReq.workspaceToken = token;
+  next();
+}
+
+function recordSuccessfulGeneration(req: Request) {
+  const authedReq = req as AuthenticatedRequest;
+  const workspace = authedReq.workspace;
+  if (!workspace) return undefined;
+
+  if (!workspace.isSubscribed) {
+    workspace.trialUsed = Math.min(TRIAL_LIMIT, workspace.trialUsed + 1);
+  }
+  workspace.updatedAt = new Date().toISOString();
+  billingStore.workspaces[workspace.id] = workspace;
+  saveBillingStore();
+  return formatBillingStatus(workspace, authedReq.workspaceToken);
+}
+
+function verifyPaddleSignature(
+  signatureHeader: string | undefined,
+  rawBody: Buffer,
+  secret: string
+): boolean {
+  if (!signatureHeader || !secret) return false;
+  const pairs = signatureHeader.split(';').map((part) => part.trim());
+  let timestamp = '';
+  const signatures: string[] = [];
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = pair.slice(0, eqIdx).trim();
+    const val = pair.slice(eqIdx + 1).trim();
+    if (key === 'ts') timestamp = val;
+    if (key === 'h1' && val) signatures.push(val);
+  }
+
+  const tsNum = Number(timestamp);
+  if (!Number.isFinite(tsNum) || signatures.length === 0) return false;
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSeconds - tsNum) > 300) {
+    return false;
+  }
+
+  const signedPayload = `${timestamp}:${rawBody.toString('utf8')}`;
+  const expectedHex = crypto
+    .createHmac('sha256', secret)
+    .update(signedPayload)
+    .digest('hex');
+
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  return signatures.some((sig) => {
+    try {
+      const actualBuf = Buffer.from(sig, 'hex');
+      return (
+        actualBuf.length === expectedBuf.length &&
+        crypto.timingSafeEqual(actualBuf, expectedBuf)
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
+// Paddle Billing Webhook (raw body required BEFORE express.json)
+app.post(
+  '/api/webhooks/paddle',
+  express.raw({ type: 'application/json', limit: '1mb' }),
+  (req: Request, res: Response) => {
+    const webhookSecret = process.env.PADDLE_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+      return res.status(503).json({
+        error: 'PADDLE_WEBHOOK_SECRET is not configured on the server.',
+      });
+    }
+
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body
+      : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body ?? {}));
+
+    const sigHeader = req.headers['paddle-signature'];
+    const signature = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
+
+    if (!verifyPaddleSignature(signature, rawBody, webhookSecret)) {
+      return res.status(401).json({ error: 'Invalid Paddle webhook signature.' });
+    }
+
+    try {
+      const event = JSON.parse(rawBody.toString('utf8')) as {
+        event_type?: string;
+        data?: {
+          id?: string;
+          status?: string;
+          customer_id?: string;
+          subscription_id?: string;
+          customer?: { email?: string };
+          custom_data?: { userId?: string };
+        };
+      };
+
+      const eventType = event.event_type || '';
+      const data = event.data || {};
+      const customUserId = data.custom_data?.userId;
+      const subscriptionId =
+        eventType.startsWith('subscription.') ? data.id : data.subscription_id;
+      const customerId = data.customer_id;
+
+      let workspace: WorkspaceRecord | undefined;
+      if (customUserId && /^[a-f0-9-]{36}$/i.test(customUserId)) {
+        workspace = billingStore.workspaces[customUserId];
+        if (!workspace) {
+          const now = new Date().toISOString();
+          workspace = {
+            id: customUserId,
+            trialUsed: 0,
+            isSubscribed: false,
+            planStatus: 'trial',
+            customerEmail: null,
+            paddleCustomerId: null,
+            paddleSubscriptionId: null,
+            lastTransactionId: null,
+            createdAt: now,
+            updatedAt: now,
+          };
+        }
+      } else if (subscriptionId) {
+        workspace = Object.values(billingStore.workspaces).find(
+          (w) => w.paddleSubscriptionId === subscriptionId
+        );
+      } else if (customerId) {
+        workspace = Object.values(billingStore.workspaces).find(
+          (w) => w.paddleCustomerId === customerId
+        );
+      }
+
+      if (workspace) {
+        const now = new Date().toISOString();
+        if (customerId) workspace.paddleCustomerId = customerId;
+        if (subscriptionId) workspace.paddleSubscriptionId = subscriptionId;
+        if (data.customer?.email) workspace.customerEmail = data.customer.email;
+        if (eventType.startsWith('transaction.') && data.id) {
+          workspace.lastTransactionId = data.id;
+        }
+
+        if (eventType === 'subscription.canceled' || data.status === 'canceled') {
+          workspace.isSubscribed = false;
+          workspace.planStatus = 'canceled';
+        } else if (eventType === 'subscription.past_due' || data.status === 'past_due') {
+          workspace.planStatus = 'past_due';
+        } else if (
+          eventType === 'transaction.completed' ||
+          eventType === 'transaction.paid' ||
+          eventType === 'subscription.activated' ||
+          eventType === 'subscription.created' ||
+          eventType === 'subscription.resumed' ||
+          (eventType === 'subscription.updated' && data.status === 'active')
+        ) {
+          workspace.isSubscribed = true;
+          workspace.planStatus = 'active';
+        }
+
+        workspace.updatedAt = now;
+        billingStore.workspaces[workspace.id] = workspace;
+        saveBillingStore();
+      }
+
+      return res.json({ received: true });
+    } catch (err) {
+      console.error('[ViralFlow Billing] Webhook parse error:', err);
+      return res.status(400).json({ error: 'Malformed webhook payload.' });
+    }
+  }
+);
+
 app.use(express.json({ limit: '10mb' }));
+
+// Billing Status Route
+app.get('/api/billing/status', (req: Request, res: Response) => {
+  const { workspace, token } = getOrCreateWorkspace(req, res);
+  res.json(formatBillingStatus(workspace, token));
+});
+
+// Client Checkout Confirmation Route (verifies transaction via Paddle API or webhook state)
+app.post('/api/billing/confirm', async (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+
+  const { workspace, token } = getOrCreateWorkspace(req, res);
+  const { transactionId, email } = req.body ?? {};
+
+  if (
+    typeof transactionId !== 'string' ||
+    !/^txn_[a-zA-Z0-9]+$/.test(transactionId.trim())
+  ) {
+    return res.status(400).json({ error: 'Valid Paddle transaction ID is required.' });
+  }
+
+  const cleanTxnId = transactionId.trim();
+  const cleanEmail =
+    typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+      ? email.trim()
+      : null;
+
+  if (workspace.isSubscribed) {
+    if (cleanEmail && !workspace.customerEmail) {
+      workspace.customerEmail = cleanEmail;
+      workspace.updatedAt = new Date().toISOString();
+      billingStore.workspaces[workspace.id] = workspace;
+      saveBillingStore();
+    }
+    return res.json({
+      confirmed: true,
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+
+  const paddleApiKey = process.env.PADDLE_API_KEY;
+  if (!paddleApiKey) {
+    return res.status(202).json({
+      confirmed: false,
+      pending: true,
+      error:
+        'Checkout completed. Add PADDLE_API_KEY or PADDLE_WEBHOOK_SECRET in Settings > Secrets so the server can verify your transaction and unlock unlimited access.',
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+
+  try {
+    const paddleRes = await fetch(
+      `https://api.paddle.com/transactions/${encodeURIComponent(cleanTxnId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${paddleApiKey}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (!paddleRes.ok) {
+      return res.status(502).json({
+        error: 'Unable to verify transaction with Paddle yet. Please retry in a few seconds.',
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+
+    const paddlePayload = (await paddleRes.json()) as {
+      data?: {
+        id?: string;
+        status?: string;
+        customer_id?: string;
+        subscription_id?: string;
+        custom_data?: { userId?: string };
+      };
+    };
+
+    const txn = paddlePayload.data;
+    const validStatus =
+      txn?.status === 'completed' || txn?.status === 'paid' || txn?.status === 'billed';
+    const customUserMatch =
+      !txn?.custom_data?.userId || txn.custom_data.userId === workspace.id;
+
+    if (!validStatus || !customUserMatch) {
+      return res.status(402).json({
+        error: 'Transaction is not yet completed for this workspace.',
+        billing: formatBillingStatus(workspace, token),
+      });
+    }
+
+    workspace.isSubscribed = true;
+    workspace.planStatus = 'active';
+    workspace.lastTransactionId = cleanTxnId;
+    if (txn?.customer_id) workspace.paddleCustomerId = txn.customer_id;
+    if (txn?.subscription_id) workspace.paddleSubscriptionId = txn.subscription_id;
+    if (cleanEmail) workspace.customerEmail = cleanEmail;
+    workspace.updatedAt = new Date().toISOString();
+    billingStore.workspaces[workspace.id] = workspace;
+    saveBillingStore();
+
+    return res.json({
+      confirmed: true,
+      billing: formatBillingStatus(workspace, token),
+    });
+  } catch (err) {
+    console.error('[ViralFlow Billing] Transaction verification failed:', err);
+    return res.status(502).json({
+      error: 'Could not reach Paddle to verify your subscription. Please try again shortly.',
+      billing: formatBillingStatus(workspace, token),
+    });
+  }
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -80,7 +640,7 @@ function parseJsonSafe<T>(rawText: string | undefined, fallbackError: string): T
 }
 
 // 1. Viral Video Hooks Generator
-app.post('/api/generate/hooks', async (req: Request, res: Response) => {
+app.post('/api/generate/hooks', requireTrialOrSubscription, async (req: Request, res: Response) => {
   try {
     const { topic, platform, audience, tone, count = 6 } = req.body ?? {};
     if (!topic || typeof topic !== 'string' || !topic.trim()) {
@@ -140,15 +700,19 @@ Keep spoken lines natural, punchy, and under 18 words so a creator can deliver t
       },
     });
 
-    const data = parseJsonSafe(response.text, 'No hook data returned from Gemini.');
-    res.json(data);
+    const data = parseJsonSafe<Record<string, unknown>>(
+      response.text,
+      'No hook data returned from Gemini.'
+    );
+    const billing = recordSuccessfulGeneration(req);
+    res.json({ ...data, billing });
   } catch (error) {
     handleApiError(res, error, 'generate viral hooks');
   }
 });
 
 // 2. Video Script Writer
-app.post('/api/generate/script', async (req: Request, res: Response) => {
+app.post('/api/generate/script', requireTrialOrSubscription, async (req: Request, res: Response) => {
   try {
     const { topic, platform, durationSec = 45, tone, keyPoints } = req.body ?? {};
     if (!topic || typeof topic !== 'string' || !topic.trim()) {
@@ -211,15 +775,19 @@ Structure the script with exact timestamps (00:00, 00:03, etc.), a high-retentio
       },
     });
 
-    const data = parseJsonSafe(response.text, 'No script returned from Gemini.');
-    res.json(data);
+    const data = parseJsonSafe<Record<string, unknown>>(
+      response.text,
+      'No script returned from Gemini.'
+    );
+    const billing = recordSuccessfulGeneration(req);
+    res.json({ ...data, billing });
   } catch (error) {
     handleApiError(res, error, 'create video script');
   }
 });
 
 // 3. Captions & Hashtags Generator
-app.post('/api/generate/captions', async (req: Request, res: Response) => {
+app.post('/api/generate/captions', requireTrialOrSubscription, async (req: Request, res: Response) => {
   try {
     const { videoSummary, niche, goal, cta } = req.body ?? {};
     if (!videoSummary || typeof videoSummary !== 'string' || !videoSummary.trim()) {
@@ -281,15 +849,19 @@ Rules:
       },
     });
 
-    const data = parseJsonSafe(response.text, 'No captions returned from Gemini.');
-    res.json(data);
+    const data = parseJsonSafe<Record<string, unknown>>(
+      response.text,
+      'No captions returned from Gemini.'
+    );
+    const billing = recordSuccessfulGeneration(req);
+    res.json({ ...data, billing });
   } catch (error) {
     handleApiError(res, error, 'generate captions and hashtags');
   }
 });
 
 // 4. Subtitle Generator (supports uploaded audio/video file OR pasted transcript/script)
-app.post('/api/generate/subtitles', upload.single('media'), async (req: Request, res: Response) => {
+app.post('/api/generate/subtitles', requireTrialOrSubscription, upload.single('media'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     const { transcriptText, durationSec = 45, maxWordsPerCue = 6, language = 'English' } = req.body ?? {};
@@ -407,15 +979,19 @@ Requirements:
       },
     });
 
-    const data = parseJsonSafe(response.text, 'No subtitle cues returned from Gemini.');
-    res.json(data);
+    const data = parseJsonSafe<Record<string, unknown>>(
+      response.text,
+      'No subtitle cues returned from Gemini.'
+    );
+    const billing = recordSuccessfulGeneration(req);
+    res.json({ ...data, billing });
   } catch (error) {
     handleApiError(res, error, 'generate subtitles');
   }
 });
 
 // 5. Long-to-Short Clip Repurposer (supports uploaded video/audio OR long-form transcript/outline)
-app.post('/api/generate/clips', upload.single('media'), async (req: Request, res: Response) => {
+app.post('/api/generate/clips', requireTrialOrSubscription, upload.single('media'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     const {
@@ -506,8 +1082,12 @@ For each extracted clip:
       },
     });
 
-    const data = parseJsonSafe(response.text, 'No short clips returned from Gemini.');
-    res.json(data);
+    const data = parseJsonSafe<Record<string, unknown>>(
+      response.text,
+      'No short clips returned from Gemini.'
+    );
+    const billing = recordSuccessfulGeneration(req);
+    res.json({ ...data, billing });
   } catch (error) {
     handleApiError(res, error, 'extract short clips');
   }
