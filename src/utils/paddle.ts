@@ -105,7 +105,7 @@ async function waitForPaddleSdk(timeoutMs = 3500): Promise<PaddleGlobal> {
 }
 
 export async function subscribeWithPaddle(params: {
-  email: string;
+  email?: string;
   workspaceId: string;
   transactionId?: string;
   onComplete: (payload: PaddleCheckoutCompletedPayload) => void;
@@ -113,6 +113,7 @@ export async function subscribeWithPaddle(params: {
   onError?: (message: string) => void;
 }): Promise<void> {
   const paddle = await waitForPaddleSdk();
+  const cleanEmail = params.email?.trim() || '';
 
   activeHandlers = {
     onComplete: params.onComplete,
@@ -147,7 +148,7 @@ export async function subscribeWithPaddle(params: {
     if (params.transactionId) {
       paddle.Checkout.open({
         transactionId: params.transactionId,
-        customer: { email: params.email },
+        ...(cleanEmail ? { customer: { email: cleanEmail } } : {}),
         settings: {
           displayMode: 'overlay',
           theme: 'dark',
@@ -156,7 +157,7 @@ export async function subscribeWithPaddle(params: {
     } else {
       paddle.Checkout.open({
         items: [{ priceId: PADDLE_PRICE_ID, quantity: 1 }],
-        customer: { email: params.email },
+        ...(cleanEmail ? { customer: { email: cleanEmail } } : {}),
         customData: { userId: params.workspaceId },
         settings: {
           displayMode: 'overlay',

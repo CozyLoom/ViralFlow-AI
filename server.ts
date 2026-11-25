@@ -23,6 +23,7 @@ const BILLING_STATE_FILE = path.join(DATA_DIR, 'billing-state.json');
 const BILLING_SECRET_FILE = path.join(DATA_DIR, 'billing-secret.key');
 
 type PlanStatus = 'inactive' | 'active' | 'past_due' | 'canceled';
+type AvatarPreset = 'studio' | 'cinema' | 'podcast' | 'optics' | 'initials';
 
 interface BillingManagementUrls {
   updatePaymentMethod?: string | null;
@@ -45,13 +46,31 @@ interface WorkspaceRecord {
   updatedAt: string;
 }
 
+interface AccountRecord {
+  id: string;
+  email: string;
+  passwordHash: string;
+  displayName: string;
+  handle: string;
+  niche: string;
+  primaryPlatform: string;
+  bio: string;
+  avatarPreset: AvatarPreset;
+  workspaceId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface BillingStoreFile {
   workspaces: Record<string, WorkspaceRecord>;
+  accounts: Record<string, AccountRecord>;
+  emailIndex: Record<string, string>;
 }
 
 interface AuthenticatedRequest extends Request {
   workspace?: WorkspaceRecord;
   workspaceToken?: string;
+  account?: AccountRecord | null;
 }
 
 function ensureDataDir() {
@@ -86,15 +105,19 @@ function getSigningSecret(): string {
   }
 }
 
-let billingStore: BillingStoreFile = { workspaces: {} };
+let billingStore: BillingStoreFile = { workspaces: {}, accounts: {}, emailIndex: {} };
 
 function loadBillingStore() {
   try {
     if (fs.existsSync(BILLING_STATE_FILE)) {
       const raw = fs.readFileSync(BILLING_STATE_FILE, 'utf8');
-      const parsed = JSON.parse(raw) as BillingStoreFile;
+      const parsed = JSON.parse(raw) as Partial<BillingStoreFile>;
       if (parsed && parsed.workspaces && typeof parsed.workspaces === 'object') {
-        billingStore = parsed;
+        billingStore = {
+          workspaces: parsed.workspaces,
+          accounts: parsed.accounts && typeof parsed.accounts === 'object' ? parsed.accounts : {},
+          emailIndex: parsed.emailIndex && typeof parsed.emailIndex === 'object' ? parsed.emailIndex : {},
+        };
       }
     }
   } catch (err) {
@@ -115,31 +138,72 @@ function saveBillingStore() {
 
 loadBillingStore();
 
-function signWorkspaceId(workspaceId: string): string {
-  const sig = crypto
-    .createHmac('sha256', getSigningSecret())
-    .update(workspaceId)
-    .digest('base64url');
-  return `${workspaceId}.${sig}`;
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${derived}`;
 }
 
-function verifyWorkspaceToken(token: string | undefined): string | null {
+function verifyPassword(password: string, storedHash: string): boolean {
+  const parts = storedHash.split(':');
+  if (parts.length !== 2) return false;
+  const [salt, expectedHex] = parts;
+  if (!salt || !expectedHex) return false;
+  try {
+    const derived = crypto.scryptSync(password, salt, 64);
+    const expectedBuf = Buffer.from(expectedHex, 'hex');
+    if (derived.length !== expectedBuf.length) return false;
+    return crypto.timingSafeEqual(derived, expectedBuf);
+  } catch {
+    return false;
+  }
+}
+
+function signSessionToken(workspaceId: string, accountId?: string | null): string {
+  const payload = accountId ? `acct.${accountId}.${workspaceId}` : workspaceId;
+  const sig = crypto
+    .createHmac('sha256', getSigningSecret())
+    .update(payload)
+    .digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifySessionToken(
+  token: string | undefined
+): { workspaceId: string; accountId: string | null } | null {
   if (!token || typeof token !== 'string') return null;
   const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [workspaceId, sig] = parts;
+
+  let payload = '';
+  let workspaceId = '';
+  let accountId: string | null = null;
+  let sig = '';
+
+  if (parts.length === 2) {
+    [workspaceId, sig] = parts;
+    payload = workspaceId;
+  } else if (parts.length === 4 && parts[0] === 'acct') {
+    accountId = parts[1];
+    workspaceId = parts[2];
+    sig = parts[3];
+    payload = `acct.${accountId}.${workspaceId}`;
+    if (!/^[a-f0-9-]{36}$/i.test(accountId)) return null;
+  } else {
+    return null;
+  }
+
   if (!/^[a-f0-9-]{36}$/i.test(workspaceId) || !sig) return null;
 
   const expectedSig = crypto
     .createHmac('sha256', getSigningSecret())
-    .update(workspaceId)
+    .update(payload)
     .digest('base64url');
 
   const actualBuf = Buffer.from(sig, 'utf8');
   const expectedBuf = Buffer.from(expectedSig, 'utf8');
   if (actualBuf.length !== expectedBuf.length) return null;
   if (!crypto.timingSafeEqual(actualBuf, expectedBuf)) return null;
-  return workspaceId;
+  return { workspaceId, accountId };
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {
@@ -316,9 +380,51 @@ function normalizeWorkspaceRecord(id: string, raw?: Partial<WorkspaceRecord>): W
   };
 }
 
+const VALID_AVATAR_PRESETS = new Set<AvatarPreset>([
+  'studio',
+  'cinema',
+  'podcast',
+  'optics',
+  'initials',
+]);
+
+const VALID_PLATFORMS = new Set<string>([
+  'TikTok',
+  'Instagram Reels',
+  'YouTube Shorts',
+  'YouTube Long-Form',
+]);
+
+function normalizeAvatarPreset(raw: unknown): AvatarPreset {
+  return typeof raw === 'string' && VALID_AVATAR_PRESETS.has(raw as AvatarPreset)
+    ? (raw as AvatarPreset)
+    : 'studio';
+}
+
+function normalizePlatform(raw: unknown): string {
+  return typeof raw === 'string' && VALID_PLATFORMS.has(raw) ? raw : 'TikTok';
+}
+
+function sanitizeAccount(account: AccountRecord) {
+  return {
+    id: account.id,
+    email: account.email,
+    displayName: account.displayName,
+    handle: account.handle,
+    niche: account.niche,
+    primaryPlatform: account.primaryPlatform,
+    bio: account.bio,
+    avatarPreset: normalizeAvatarPreset(account.avatarPreset),
+    workspaceId: account.workspaceId,
+    createdAt: account.createdAt,
+    updatedAt: account.updatedAt,
+  };
+}
+
 function getOrCreateWorkspace(req: Request, res: Response): {
   workspace: WorkspaceRecord;
   token: string;
+  account: AccountRecord | null;
 } {
   const authHeader = req.headers.authorization;
   const bearerToken =
@@ -326,33 +432,50 @@ function getOrCreateWorkspace(req: Request, res: Response): {
   const cookies = parseCookies(req.headers.cookie);
   const cookieToken = cookies[WORKSPACE_COOKIE_NAME];
 
-  const verifiedId =
-    verifyWorkspaceToken(bearerToken) || verifyWorkspaceToken(cookieToken);
+  const verifiedBearer = verifySessionToken(bearerToken);
+  const verifiedCookie = verifySessionToken(cookieToken);
+  const verified = verifiedBearer || verifiedCookie;
 
-  if (verifiedId) {
-    const rawExisting = billingStore.workspaces[verifiedId];
-    const existing = normalizeWorkspaceRecord(verifiedId, rawExisting);
+  if (verified) {
+    let account: AccountRecord | null = null;
+    let resolvedWorkspaceId = verified.workspaceId;
+
+    if (verified.accountId && billingStore.accounts[verified.accountId]) {
+      account = billingStore.accounts[verified.accountId];
+      resolvedWorkspaceId = account.workspaceId || resolvedWorkspaceId;
+    }
+
+    const rawExisting = billingStore.workspaces[resolvedWorkspaceId];
+    const existing = normalizeWorkspaceRecord(resolvedWorkspaceId, rawExisting);
     if (!rawExisting) {
-      billingStore.workspaces[verifiedId] = existing;
+      billingStore.workspaces[resolvedWorkspaceId] = existing;
       saveBillingStore();
     }
-    const token = signWorkspaceId(existing.id);
-    if (!cookieToken || verifyWorkspaceToken(cookieToken) !== existing.id) {
+    const token = signSessionToken(existing.id, account?.id ?? null);
+    if (
+      !verifiedCookie ||
+      verifiedCookie.workspaceId !== existing.id ||
+      verifiedCookie.accountId !== (account?.id ?? null)
+    ) {
       setWorkspaceCookie(req, res, token);
     }
-    return { workspace: existing, token };
+    return { workspace: existing, token, account };
   }
 
   const newId = crypto.randomUUID();
   const created = normalizeWorkspaceRecord(newId);
   billingStore.workspaces[newId] = created;
   saveBillingStore();
-  const token = signWorkspaceId(newId);
+  const token = signSessionToken(newId, null);
   setWorkspaceCookie(req, res, token);
-  return { workspace: created, token };
+  return { workspace: created, token, account: null };
 }
 
-function formatBillingStatus(workspace: WorkspaceRecord, token?: string) {
+function formatBillingStatus(
+  workspace: WorkspaceRecord,
+  token?: string,
+  account?: AccountRecord | null
+) {
   const freeUsed = Math.min(FREE_TRIAL_LIMIT, Math.max(0, workspace.freeUsed || 0));
   const freeRemaining = workspace.isSubscribed
     ? FREE_TRIAL_LIMIT
@@ -376,6 +499,9 @@ function formatBillingStatus(workspace: WorkspaceRecord, token?: string) {
     managementUrls: workspace.managementUrls,
     updatedAt: workspace.updatedAt,
     ...(token ? { token } : {}),
+    ...(account !== undefined
+      ? { account: account ? sanitizeAccount(account) : null }
+      : {}),
   };
 }
 
@@ -685,7 +811,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 // Billing Status Route
 app.get('/api/billing/status', async (req: Request, res: Response) => {
-  const { workspace, token } = getOrCreateWorkspace(req, res);
+  const { workspace, token, account } = getOrCreateWorkspace(req, res);
   if (req.query.sync === '1' && workspace.paddleSubscriptionId && getPaddleApiKey()) {
     try {
       await syncSubscriptionFromPaddle(workspace);
@@ -693,7 +819,238 @@ app.get('/api/billing/status', async (req: Request, res: Response) => {
       // Return cached billing state if Paddle sync is temporarily unreachable
     }
   }
-  res.json(formatBillingStatus(workspace, token));
+  res.json(formatBillingStatus(workspace, token, account));
+});
+
+// Create Account & Creator Profile
+app.post('/api/auth/register', (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+
+  const {
+    email,
+    password,
+    displayName,
+    handle,
+    niche,
+    primaryPlatform,
+    bio,
+    avatarPreset,
+  } = req.body ?? {};
+
+  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const cleanName = typeof displayName === 'string' ? displayName.trim().slice(0, 60) : '';
+  const rawPassword = typeof password === 'string' ? password : '';
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).json({ error: 'Enter a valid email address.' });
+  }
+  if (cleanName.length < 2) {
+    return res.status(400).json({ error: 'Display name must be at least 2 characters.' });
+  }
+  if (rawPassword.length < 8 || rawPassword.length > 128) {
+    return res.status(400).json({ error: 'Password must be between 8 and 128 characters.' });
+  }
+  if (billingStore.emailIndex[cleanEmail]) {
+    return res.status(409).json({
+      error: 'An account with this email already exists. Switch to Sign In instead.',
+    });
+  }
+
+  // Inherit current guest workspace (trial count or existing subscription) if not already owned
+  const currentSession = getOrCreateWorkspace(req, res);
+  const existingOwner = Object.values(billingStore.accounts).find(
+    (acct) => acct.workspaceId === currentSession.workspace.id
+  );
+
+  let workspace = currentSession.workspace;
+  if (existingOwner) {
+    const newWsId = crypto.randomUUID();
+    workspace = normalizeWorkspaceRecord(newWsId, {
+      customerEmail: cleanEmail,
+    });
+    billingStore.workspaces[newWsId] = workspace;
+  } else {
+    workspace.customerEmail = workspace.customerEmail || cleanEmail;
+    workspace.updatedAt = new Date().toISOString();
+    billingStore.workspaces[workspace.id] = workspace;
+  }
+
+  const rawHandle = typeof handle === 'string' ? handle.trim().replace(/^@+/, '') : '';
+  const cleanHandle = rawHandle
+    ? `@${rawHandle.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 32)}`
+    : `@${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'creator'}`;
+
+  const now = new Date().toISOString();
+  const accountId = crypto.randomUUID();
+  const account: AccountRecord = {
+    id: accountId,
+    email: cleanEmail,
+    passwordHash: hashPassword(rawPassword),
+    displayName: cleanName,
+    handle: cleanHandle,
+    niche: typeof niche === 'string' ? niche.trim().slice(0, 80) : '',
+    primaryPlatform: normalizePlatform(primaryPlatform),
+    bio: typeof bio === 'string' ? bio.trim().slice(0, 280) : '',
+    avatarPreset: normalizeAvatarPreset(avatarPreset),
+    workspaceId: workspace.id,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  billingStore.accounts[accountId] = account;
+  billingStore.emailIndex[cleanEmail] = accountId;
+  saveBillingStore();
+
+  const token = signSessionToken(workspace.id, account.id);
+  setWorkspaceCookie(req, res, token);
+
+  return res.status(201).json({
+    account: sanitizeAccount(account),
+    billing: formatBillingStatus(workspace, token, account),
+  });
+});
+
+// Sign In to Account
+app.post('/api/auth/login', (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+
+  const { email, password } = req.body ?? {};
+  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const rawPassword = typeof password === 'string' ? password : '';
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || !rawPassword) {
+    return res.status(400).json({ error: 'Enter your email and password.' });
+  }
+
+  const accountId = billingStore.emailIndex[cleanEmail];
+  const account = accountId ? billingStore.accounts[accountId] : undefined;
+  if (!account || !verifyPassword(rawPassword, account.passwordHash)) {
+    return res.status(401).json({ error: 'Invalid email or password.' });
+  }
+
+  const workspace = normalizeWorkspaceRecord(
+    account.workspaceId,
+    billingStore.workspaces[account.workspaceId]
+  );
+  if (!billingStore.workspaces[account.workspaceId]) {
+    billingStore.workspaces[account.workspaceId] = workspace;
+    saveBillingStore();
+  }
+
+  const token = signSessionToken(workspace.id, account.id);
+  setWorkspaceCookie(req, res, token);
+
+  return res.json({
+    account: sanitizeAccount(account),
+    billing: formatBillingStatus(workspace, token, account),
+  });
+});
+
+// Sign Out
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+
+  const newWsId = crypto.randomUUID();
+  const guestWorkspace = normalizeWorkspaceRecord(newWsId);
+  billingStore.workspaces[newWsId] = guestWorkspace;
+  saveBillingStore();
+
+  const token = signSessionToken(newWsId, null);
+  setWorkspaceCookie(req, res, token);
+
+  return res.json({
+    signedOut: true,
+    billing: formatBillingStatus(guestWorkspace, token, null),
+  });
+});
+
+// Get Current Account & Profile
+app.get('/api/account/profile', (req: Request, res: Response) => {
+  const { workspace, token, account } = getOrCreateWorkspace(req, res);
+  return res.json({
+    account: account ? sanitizeAccount(account) : null,
+    billing: formatBillingStatus(workspace, token, account),
+  });
+});
+
+// Update Creator Profile
+app.patch('/api/account/profile', (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+
+  const { workspace, account } = getOrCreateWorkspace(req, res);
+  if (!account) {
+    return res.status(401).json({ error: 'Sign in or create an account to save your profile.' });
+  }
+
+  const { displayName, handle, niche, primaryPlatform, bio, avatarPreset } = req.body ?? {};
+  if (displayName !== undefined) {
+    const cleanName = typeof displayName === 'string' ? displayName.trim().slice(0, 60) : '';
+    if (cleanName.length < 2) {
+      return res.status(400).json({ error: 'Display name must be at least 2 characters.' });
+    }
+    account.displayName = cleanName;
+  }
+  if (handle !== undefined && typeof handle === 'string') {
+    const rawHandle = handle.trim().replace(/^@+/, '').replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 32);
+    if (rawHandle) account.handle = `@${rawHandle}`;
+  }
+  if (niche !== undefined && typeof niche === 'string') {
+    account.niche = niche.trim().slice(0, 80);
+  }
+  if (primaryPlatform !== undefined) {
+    account.primaryPlatform = normalizePlatform(primaryPlatform);
+  }
+  if (bio !== undefined && typeof bio === 'string') {
+    account.bio = bio.trim().slice(0, 280);
+  }
+  if (avatarPreset !== undefined) {
+    account.avatarPreset = normalizeAvatarPreset(avatarPreset);
+  }
+
+  account.updatedAt = new Date().toISOString();
+  billingStore.accounts[account.id] = account;
+  saveBillingStore();
+
+  const token = signSessionToken(workspace.id, account.id);
+  return res.json({
+    account: sanitizeAccount(account),
+    billing: formatBillingStatus(workspace, token, account),
+  });
+});
+
+// Update Account Password
+app.post('/api/account/password', (req: Request, res: Response) => {
+  if (!verifySameOriginForCookieAuth(req)) {
+    return res.status(403).json({ error: 'Invalid request origin.' });
+  }
+
+  const { account } = getOrCreateWorkspace(req, res);
+  if (!account) {
+    return res.status(401).json({ error: 'Sign in to change your password.' });
+  }
+
+  const { currentPassword, newPassword } = req.body ?? {};
+  if (typeof currentPassword !== 'string' || !verifyPassword(currentPassword, account.passwordHash)) {
+    return res.status(400).json({ error: 'Current password is incorrect.' });
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 128) {
+    return res.status(400).json({ error: 'New password must be between 8 and 128 characters.' });
+  }
+
+  account.passwordHash = hashPassword(newPassword);
+  account.updatedAt = new Date().toISOString();
+  billingStore.accounts[account.id] = account;
+  saveBillingStore();
+
+  return res.json({ updated: true });
 });
 
 // Update Workspace Billing Email

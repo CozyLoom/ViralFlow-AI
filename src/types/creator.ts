@@ -7,7 +7,8 @@ export type StudioModule =
   | 'captions'
   | 'subtitles'
   | 'clips'
-  | 'subscription';
+  | 'subscription'
+  | 'account';
 
 export interface HookItem {
   id: string;
@@ -115,6 +116,22 @@ export interface BillingManagementUrls {
   cancel?: string | null;
 }
 
+export type AvatarPreset = 'studio' | 'cinema' | 'podcast' | 'optics' | 'initials';
+
+export interface UserAccount {
+  id: string;
+  email: string;
+  displayName: string;
+  handle: string;
+  niche: string;
+  primaryPlatform: Platform;
+  bio: string;
+  avatarPreset: AvatarPreset;
+  workspaceId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BillingStatus {
   workspaceId: string;
   isSubscribed: boolean;
@@ -132,5 +149,6 @@ export interface BillingStatus {
   managementUrls?: BillingManagementUrls | null;
   updatedAt?: string;
   token?: string;
+  account?: UserAccount | null;
 }
 

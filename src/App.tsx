@@ -12,6 +12,7 @@ import {
   Trash2,
   CreditCard,
   Lock,
+  User,
 } from 'lucide-react';
 import {
   BillingStatus,
@@ -23,6 +24,7 @@ import {
   SavedSessionItem,
   StudioModule,
   SubtitlesResponse,
+  UserAccount,
   VideoScriptResponse,
 } from './types/creator';
 import { StudioOverview } from './components/StudioOverview';
@@ -32,10 +34,11 @@ import { CaptionsStudio } from './components/CaptionsStudio';
 import { SubtitlesStudio } from './components/SubtitlesStudio';
 import { ClipsStudio } from './components/ClipsStudio';
 import { SubscriptionSection } from './components/SubscriptionSection';
+import { AccountSection } from './components/AccountSection';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { apiFetch, parseApiJson, setWorkspaceToken } from './utils/api';
-import creatorAvatarImg from './assets/images/creator_avatar_1795421850716.jpg';
+import { getAvatarImage, getInitials } from './utils/avatars';
 
 const STORAGE_KEY = 'viralflow_session_history_v1';
 
@@ -52,6 +55,7 @@ const NAV_ITEMS: Array<{
   { id: 'subtitles', label: 'Subtitle Studio', subtitle: 'Timed cues, .SRT & .VTT', icon: Captions },
   { id: 'clips', label: 'Short Clips', subtitle: 'Long-to-short repurposer', icon: Scissors },
   { id: 'subscription', label: 'Subscription', subtitle: 'Plan, billing & access', icon: CreditCard },
+  { id: 'account', label: 'Account & Profile', subtitle: 'Creator identity & security', icon: User },
 ];
 
 export default function App() {
@@ -59,7 +63,8 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
 
-  // Free trial (3 generations) + Paddle subscription state
+  // Free trial (3 generations), Account profile & Paddle subscription state
+  const [account, setAccount] = useState<UserAccount | null>(null);
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [billingLoading, setBillingLoading] = useState(true);
   const [backendUnavailable, setBackendUnavailable] = useState(false);
@@ -108,6 +113,13 @@ export default function App() {
       .then((status) => {
         if (cancelled) return;
         if (status.token) setWorkspaceToken(status.token);
+        if (status.account !== undefined) {
+          setAccount(status.account);
+          if (status.account?.primaryPlatform) {
+            setHookDraftPlatform(status.account.primaryPlatform);
+            setScriptDraftPlatform(status.account.primaryPlatform);
+          }
+        }
         setBilling(status);
         setBackendUnavailable(false);
         if (status.canUseApp) {
@@ -143,6 +155,9 @@ export default function App() {
 
   const handleBillingUpdate = (next: BillingStatus) => {
     if (next.token) setWorkspaceToken(next.token);
+    if (next.account !== undefined) {
+      setAccount(next.account);
+    }
     const wasSubscribed = Boolean(billing?.isSubscribed);
     setBilling(next);
     setBackendUnavailable(false);
@@ -150,7 +165,7 @@ export default function App() {
       setBlockedNotice(
         'Your 3-generation free trial is complete. Complete payment below to activate ViralFlow Pro.'
       );
-      setActiveModule('subscription');
+      setActiveModule((prev) => (prev === 'account' ? 'account' : 'subscription'));
     } else {
       setBlockedNotice(null);
       if (next.isSubscribed && !wasSubscribed) {
@@ -159,8 +174,20 @@ export default function App() {
     }
   };
 
+  const handleAccountUpdate = (nextAccount: UserAccount | null, nextBilling?: BillingStatus) => {
+    setAccount(nextAccount);
+    setAvatarError(false);
+    if (nextAccount?.primaryPlatform) {
+      setHookDraftPlatform(nextAccount.primaryPlatform);
+      setScriptDraftPlatform(nextAccount.primaryPlatform);
+    }
+    if (nextBilling) {
+      handleBillingUpdate(nextBilling);
+    }
+  };
+
   const navigateToModule = (target: StudioModule) => {
-    if (!isAppUnlocked && target !== 'subscription') {
+    if (!isAppUnlocked && target !== 'subscription' && target !== 'account') {
       setBlockedNotice(
         'Your 3-generation free trial has ended. Complete payment below to activate ViralFlow Pro.'
       );
@@ -233,8 +260,10 @@ export default function App() {
     if (activeModule === 'clips') setClipsResult(null);
   };
 
-  const effectiveModule: StudioModule = isAppUnlocked ? activeModule : 'subscription';
+  const effectiveModule: StudioModule =
+    isAppUnlocked || activeModule === 'account' ? activeModule : 'subscription';
   const activeNav = NAV_ITEMS.find((n) => n.id === effectiveModule) || NAV_ITEMS[NAV_ITEMS.length - 1];
+  const sidebarAvatarSrc = getAvatarImage(account?.avatarPreset);
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full bg-[#0B0F19] border-r border-white/10">
@@ -269,7 +298,10 @@ export default function App() {
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = effectiveModule === item.id;
-            const isLocked = !isAppUnlocked && item.id !== 'subscription';
+            const isLocked =
+              !isAppUnlocked &&
+              item.id !== 'subscription' &&
+              item.id !== 'account';
             return (
               <button
                 key={item.id}
@@ -402,25 +434,33 @@ export default function App() {
           )}
         </div>
         <PWAInstallButton />
-        <div className="flex items-center gap-3">
-          {!avatarError ? (
+        <button
+          type="button"
+          onClick={() => navigateToModule('account')}
+          className="w-full flex items-center gap-3 p-1.5 -mx-1.5 rounded-lg hover:bg-white/[0.05] transition-colors text-left"
+        >
+          {sidebarAvatarSrc && !avatarError ? (
             <img
-              src={creatorAvatarImg}
-              alt="Creator workspace profile"
+              src={sidebarAvatarSrc}
+              alt={account?.displayName || 'Creator workspace profile'}
               referrerPolicy="no-referrer"
               onError={() => setAvatarError(true)}
               className="w-9 h-9 rounded-full object-cover border border-white/15 shrink-0"
             />
           ) : (
             <div className="w-9 h-9 rounded-full bg-slate-800 text-slate-200 text-xs font-semibold flex items-center justify-center shrink-0">
-              VF
+              {getInitials(account?.displayName)}
             </div>
           )}
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-slate-100 truncate">Creator Studio</p>
-            <p className="text-[13px] text-slate-400 truncate">TikTok · Reels · Shorts</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-slate-100 truncate">
+              {account ? account.displayName : 'Creator Account'}
+            </p>
+            <p className="text-[13px] text-slate-400 truncate">
+              {account ? `${account.handle} · ${account.primaryPlatform}` : 'Create profile or sign in'}
+            </p>
           </div>
-        </div>
+        </button>
       </div>
     </div>
   );
@@ -490,7 +530,7 @@ export default function App() {
                     </span>
                   </button>
                 )}
-                {effectiveModule === 'subscription' ? (
+                {effectiveModule === 'subscription' || effectiveModule === 'account' ? (
                   <button
                     type="button"
                     onClick={() => navigateToModule('overview')}
@@ -520,7 +560,17 @@ export default function App() {
 
         {/* Active Module Viewport */}
         <main className="flex-1 p-4 sm:p-8 max-w-[1440px] w-full mx-auto">
-          {(!isAppUnlocked || effectiveModule === 'subscription') && (
+          {effectiveModule === 'account' && (
+            <AccountSection
+              account={account}
+              billing={billing}
+              onAccountUpdate={handleAccountUpdate}
+              onOpenSubscription={() => navigateToModule('subscription')}
+              onOpenStudio={() => navigateToModule('overview')}
+            />
+          )}
+
+          {effectiveModule !== 'account' && (!isAppUnlocked || effectiveModule === 'subscription') && (
             <SubscriptionSection
               billing={billing}
               billingLoading={billingLoading}
