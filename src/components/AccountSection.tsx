@@ -336,10 +336,10 @@ export const AccountSection: React.FC<AccountSectionProps> = ({
               <div className="divide-y divide-white/10 border-t border-white/10 text-sm">
                 <div className="py-4">
                   <h3 className="font-semibold text-white">
-                    01. Persistent Trial &amp; Pro Access
+                    01. Fresh 3-Run Trial &amp; Pro Access
                   </h3>
                   <p className="text-slate-400 mt-1 text-xs sm:text-sm leading-relaxed">
-                    Your current workspace trial balance and Paddle subscription link straight to your account so you can sign back in anytime.
+                    Every newly created account starts with a fresh 3-generation free trial, and any Paddle Pro subscription links straight to your account.
                   </p>
                 </div>
                 <div className="py-4">

@@ -858,23 +858,28 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
     });
   }
 
-  // Inherit current guest workspace (trial count or existing subscription) if not already owned
+  // Give every newly created account a fresh 3-generation free trial workspace
+  // (only inherit the current guest workspace if it already holds an active unowned subscription)
   const currentSession = getOrCreateWorkspace(req, res);
   const existingOwner = Object.values(billingStore.accounts).find(
     (acct) => acct.workspaceId === currentSession.workspace.id
   );
 
-  let workspace = currentSession.workspace;
-  if (existingOwner) {
-    const newWsId = crypto.randomUUID();
-    workspace = normalizeWorkspaceRecord(newWsId, {
-      customerEmail: cleanEmail,
-    });
-    billingStore.workspaces[newWsId] = workspace;
-  } else {
+  let workspace: WorkspaceRecord;
+  if (!existingOwner && currentSession.workspace.isSubscribed) {
+    workspace = currentSession.workspace;
     workspace.customerEmail = workspace.customerEmail || cleanEmail;
     workspace.updatedAt = new Date().toISOString();
     billingStore.workspaces[workspace.id] = workspace;
+  } else {
+    const newWsId = crypto.randomUUID();
+    workspace = normalizeWorkspaceRecord(newWsId, {
+      freeUsed: 0,
+      isSubscribed: false,
+      planStatus: 'inactive',
+      customerEmail: cleanEmail,
+    });
+    billingStore.workspaces[newWsId] = workspace;
   }
 
   const rawHandle = typeof handle === 'string' ? handle.trim().replace(/^@+/, '') : '';
@@ -1915,6 +1920,11 @@ app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     });
   }
   next(err);
+});
+
+// Ensure unknown /api/* routes always return JSON instead of SPA HTML
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({ error: 'API endpoint not found.' });
 });
 
 async function startServer() {

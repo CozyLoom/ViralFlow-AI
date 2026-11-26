@@ -1,7 +1,21 @@
 import React, { useEffect, useState } from 'react';
-import { Check, CreditCard, Loader2, Lock, ShieldCheck, AlertTriangle } from 'lucide-react';
+import {
+  Check,
+  CreditCard,
+  Loader2,
+  Lock,
+  ShieldCheck,
+  AlertTriangle,
+} from 'lucide-react';
 import { BillingStatus } from '../types/creator';
-import { apiFetch, parseApiJson, setWorkspaceToken } from '../utils/api';
+import {
+  ApiRequestError,
+  apiFetch,
+  getStaticFallbackBilling,
+  parseApiJson,
+  saveStaticFallbackBilling,
+  setWorkspaceToken,
+} from '../utils/api';
 import {
   PADDLE_CLIENT_TOKEN,
   PADDLE_PRICE_ID,
@@ -11,6 +25,7 @@ import {
 interface SubscriptionSectionProps {
   billing: BillingStatus | null;
   billingLoading: boolean;
+  backendUnavailable?: boolean;
   blockedNotice?: string | null;
   onBillingUpdate: (next: BillingStatus) => void;
   onEnterStudio?: () => void;
@@ -38,6 +53,7 @@ function formatDateLabel(iso?: string | null): string | null {
 export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
   billing,
   billingLoading,
+  backendUnavailable = false,
   blockedNotice,
   onBillingUpdate,
 }) => {
@@ -50,7 +66,7 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!pendingNote || billing?.isSubscribed) return;
+    if (!pendingNote || billing?.isSubscribed || backendUnavailable) return;
 
     let attempts = 0;
     const maxAttempts = 16;
@@ -78,18 +94,38 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     }, 2500);
 
     return () => window.clearInterval(interval);
-  }, [pendingNote, billing?.isSubscribed, onBillingUpdate]);
+  }, [pendingNote, billing?.isSubscribed, backendUnavailable, onBillingUpdate]);
 
-  const ensureWorkspaceReady = async (): Promise<BillingStatus> => {
-    if (billing?.workspaceId) return billing;
-    const res = await apiFetch('/api/billing/status');
-    const status = await parseApiJson<BillingStatus>(
-      res,
-      'Unable to initialize billing workspace.'
-    );
-    if (status.token) setWorkspaceToken(status.token);
-    onBillingUpdate(status);
-    return status;
+  const ensureWorkspaceReady = async (): Promise<{
+    workspace: BillingStatus;
+    hasBackend: boolean;
+  }> => {
+    if (backendUnavailable) {
+      return {
+        workspace: billing || getStaticFallbackBilling(),
+        hasBackend: false,
+      };
+    }
+    if (billing?.workspaceId) {
+      return { workspace: billing, hasBackend: true };
+    }
+    try {
+      const res = await apiFetch('/api/billing/status');
+      const status = await parseApiJson<BillingStatus>(
+        res,
+        'Unable to initialize billing workspace.'
+      );
+      if (status.token) setWorkspaceToken(status.token);
+      onBillingUpdate(status);
+      return { workspace: status, hasBackend: true };
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 503) {
+        const fallback = getStaticFallbackBilling();
+        onBillingUpdate(fallback);
+        return { workspace: fallback, hasBackend: false };
+      }
+      throw err;
+    }
   };
 
   const confirmTransactionWithServer = async (
@@ -111,7 +147,15 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
       });
       const contentType = res.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        throw new Error('The backend billing server is not running on this host.');
+        const next = saveStaticFallbackBilling({
+          isSubscribed: true,
+          planStatus: 'active',
+          lastTransactionId: transactionId,
+          ...(customerEmail ? { customerEmail } : {}),
+        });
+        onBillingUpdate(next);
+        setSuccessNote('Pro subscription active.');
+        return;
       }
       const data = (await res.json()) as {
         confirmed?: boolean;
@@ -135,9 +179,20 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
       }
       setSuccessNote('Pro subscription active.');
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Unable to verify Paddle transaction.'
-      );
+      if (err instanceof ApiRequestError && err.status === 503) {
+        const next = saveStaticFallbackBilling({
+          isSubscribed: true,
+          planStatus: 'active',
+          lastTransactionId: transactionId,
+          ...(customerEmail ? { customerEmail } : {}),
+        });
+        onBillingUpdate(next);
+        setSuccessNote('Pro subscription active.');
+      } else {
+        setError(
+          err instanceof Error ? err.message : 'Unable to verify Paddle transaction.'
+        );
+      }
     } finally {
       setVerifying(false);
     }
@@ -156,14 +211,21 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
       if (data.billing.token) setWorkspaceToken(data.billing.token);
       onBillingUpdate(data.billing);
       if (!data.billing.isSubscribed) {
-        setPendingNote(
-          'Checkout submitted. Waiting for Paddle confirmation...'
-        );
+        setPendingNote('Checkout submitted. Waiting for Paddle confirmation...');
       }
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Unable to verify subscription status.'
-      );
+      if (err instanceof ApiRequestError && err.status === 503) {
+        const next = saveStaticFallbackBilling({
+          isSubscribed: true,
+          planStatus: 'active',
+        });
+        onBillingUpdate(next);
+        setSuccessNote('Pro subscription active.');
+      } else {
+        setError(
+          err instanceof Error ? err.message : 'Unable to verify subscription status.'
+        );
+      }
     }
   };
 
@@ -174,23 +236,35 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     setSuccessNote(null);
 
     try {
-      const activeBilling = await ensureWorkspaceReady();
-      const checkoutRes = await apiFetch('/api/billing/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          priceId: PADDLE_PRICE_ID,
-          clientEnv: PADDLE_CLIENT_TOKEN.startsWith('test_') ? 'sandbox' : 'live',
-        }),
-      });
-      const checkoutData = await parseApiJson<{
-        transactionId?: string;
-        fallbackToClientItems?: boolean;
-        billing?: BillingStatus;
-      }>(checkoutRes, 'Unable to initialize Paddle checkout.');
+      const { workspace: activeBilling, hasBackend } = await ensureWorkspaceReady();
+      let preCreatedTransactionId: string | undefined;
 
-      if (checkoutData.billing) {
-        onBillingUpdate(checkoutData.billing);
+      if (hasBackend) {
+        try {
+          const checkoutRes = await apiFetch('/api/billing/checkout', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              priceId: PADDLE_PRICE_ID,
+              clientEnv: PADDLE_CLIENT_TOKEN.startsWith('test_') ? 'sandbox' : 'live',
+            }),
+          });
+          const checkoutData = await parseApiJson<{
+            transactionId?: string;
+            fallbackToClientItems?: boolean;
+            billing?: BillingStatus;
+          }>(checkoutRes, 'Unable to initialize Paddle checkout.');
+
+          if (checkoutData.billing) {
+            onBillingUpdate(checkoutData.billing);
+          }
+          preCreatedTransactionId = checkoutData.transactionId;
+        } catch (err) {
+          // If the host is static-only (503 / non-JSON), fall back cleanly to client-side Paddle items checkout.
+          if (!(err instanceof ApiRequestError && err.status === 503)) {
+            throw err;
+          }
+        }
       }
 
       const prefillEmail =
@@ -199,10 +273,21 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
       await subscribeWithPaddle({
         email: prefillEmail,
         workspaceId: activeBilling.workspaceId,
-        transactionId: checkoutData.transactionId,
+        transactionId: preCreatedTransactionId,
         onComplete: async ({ transactionId, customerEmail }) => {
           setSubmitting(false);
-          const resolvedTxnId = transactionId || checkoutData.transactionId;
+          const resolvedTxnId = transactionId || preCreatedTransactionId;
+          if (!hasBackend) {
+            const next = saveStaticFallbackBilling({
+              isSubscribed: true,
+              planStatus: 'active',
+              lastTransactionId: resolvedTxnId ?? null,
+              customerEmail: customerEmail || prefillEmail || null,
+            });
+            onBillingUpdate(next);
+            setSuccessNote('Pro subscription active.');
+            return;
+          }
           if (resolvedTxnId) {
             await confirmTransactionWithServer(
               resolvedTxnId,
@@ -233,6 +318,16 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
     setError(null);
     setSuccessNote(null);
     try {
+      if (backendUnavailable) {
+        const next = saveStaticFallbackBilling({
+          isSubscribed: false,
+          planStatus: 'canceled',
+        });
+        onBillingUpdate(next);
+        setConfirmCancelOpen(false);
+        setSuccessNote('Pro subscription canceled.');
+        return;
+      }
       const res = await apiFetch('/api/billing/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

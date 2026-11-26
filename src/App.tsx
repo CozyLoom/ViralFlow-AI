@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   LayoutGrid,
   Zap,
@@ -37,7 +37,12 @@ import { SubscriptionSection } from './components/SubscriptionSection';
 import { AccountSection } from './components/AccountSection';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import { apiFetch, parseApiJson, setWorkspaceToken } from './utils/api';
+import {
+  apiFetch,
+  getStaticFallbackBilling,
+  parseApiJson,
+  setWorkspaceToken,
+} from './utils/api';
 import { getAvatarImage, getInitials } from './utils/avatars';
 
 const STORAGE_KEY = 'viralflow_session_history_v1';
@@ -105,47 +110,55 @@ export default function App() {
     }
   }, [history]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const refreshBillingStatus = useCallback(async (fromReconnect = false) => {
     setBillingLoading(true);
-    apiFetch('/api/billing/status?sync=1')
-      .then((res) => parseApiJson<BillingStatus>(res, 'Unable to load subscription status.'))
-      .then((status) => {
-        if (cancelled) return;
-        if (status.token) setWorkspaceToken(status.token);
-        if (status.account !== undefined) {
-          setAccount(status.account);
-          if (status.account?.primaryPlatform) {
-            setHookDraftPlatform(status.account.primaryPlatform);
-            setScriptDraftPlatform(status.account.primaryPlatform);
-          }
+    try {
+      const res = await apiFetch('/api/billing/status?sync=1');
+      const status = await parseApiJson<BillingStatus>(
+        res,
+        'Unable to load subscription status.'
+      );
+      if (status.token) setWorkspaceToken(status.token);
+      if (status.account !== undefined) {
+        setAccount(status.account);
+        if (status.account?.primaryPlatform) {
+          setHookDraftPlatform(status.account.primaryPlatform);
+          setScriptDraftPlatform(status.account.primaryPlatform);
         }
-        setBilling(status);
-        setBackendUnavailable(false);
-        if (status.canUseApp) {
-          setBlockedNotice(null);
-        } else {
-          setActiveModule('subscription');
-          setBlockedNotice(
-            'Your 3-generation free trial is complete. Complete payment below to activate ViralFlow Pro.'
-          );
+      }
+      setBilling(status);
+      setBackendUnavailable(false);
+      if (status.canUseApp) {
+        setBlockedNotice(null);
+        if (fromReconnect) {
+          setActiveModule('overview');
         }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setBackendUnavailable(true);
+      } else {
         setActiveModule('subscription');
         setBlockedNotice(
-          'Subscription verification requires the live studio backend server. Complete payment once connected to unlock the app.'
+          'Your 3-generation free trial is complete. Complete payment below to activate ViralFlow Pro.'
         );
-      })
-      .finally(() => {
-        if (!cancelled) setBillingLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      }
+    } catch {
+      setBackendUnavailable(true);
+      const fallback = getStaticFallbackBilling();
+      setBilling(fallback);
+      if (fallback.canUseApp) {
+        setBlockedNotice(null);
+      } else {
+        setActiveModule('subscription');
+        setBlockedNotice(
+          'Your 3-generation free trial is complete. Complete payment below to activate ViralFlow Pro.'
+        );
+      }
+    } finally {
+      setBillingLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshBillingStatus(false);
+  }, [refreshBillingStatus]);
 
   const isSubscribed = Boolean(billing?.isSubscribed);
   const freeLimit = billing?.freeLimit ?? 3;
@@ -400,7 +413,7 @@ export default function App() {
               <span className="font-medium text-emerald-400 truncate">
                 Subscription · Active
               </span>
-            ) : freeRemaining > 0 && !backendUnavailable ? (
+            ) : freeRemaining > 0 ? (
               <span className="font-medium text-slate-200 truncate tabular-nums">
                 Free Trial · {freeRemaining} of {freeLimit} left
               </span>
@@ -414,10 +427,14 @@ export default function App() {
               onClick={() => navigateToModule('subscription')}
               className="font-semibold text-rose-400 hover:text-rose-300 transition-colors whitespace-nowrap shrink-0"
             >
-              {isSubscribed ? 'Manage' : freeRemaining > 0 && !backendUnavailable ? 'Activate' : 'Unlock'}
+              {isSubscribed
+                ? 'Manage'
+                : freeRemaining > 0
+                ? 'Activate'
+                : 'Unlock'}
             </button>
           </div>
-          {!isSubscribed && !backendUnavailable && (
+          {!isSubscribed && (
             <div className="grid grid-cols-3 gap-1" aria-label={`${freeUsed} of ${freeLimit} free trials used`}>
               {Array.from({ length: freeLimit }).map((_, idx) => {
                 const isRemaining = idx < freeRemaining;
@@ -574,6 +591,7 @@ export default function App() {
             <SubscriptionSection
               billing={billing}
               billingLoading={billingLoading}
+              backendUnavailable={backendUnavailable}
               blockedNotice={blockedNotice}
               onBillingUpdate={handleBillingUpdate}
               onEnterStudio={() => navigateToModule('overview')}
