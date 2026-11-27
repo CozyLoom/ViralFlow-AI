@@ -56,6 +56,9 @@ export default defineConfig(() => {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           globIgnores: ['assets/aistudio/**'],
           navigateFallbackDenylist: [/^\/api\//],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           runtimeCaching: [
             {
               urlPattern: /\.(?:jpg|jpeg|webp)$/i,

@@ -198,10 +198,13 @@ export async function apiFetch(
   } catch {
     const targetHint = base
       ? `Check that ${base}/api/health is reachable and CORS_ORIGIN allows this domain.`
-      : 'Connect your deployed Node backend URL below or set VITE_API_BASE_URL for the frontend.';
+      : 'Deploy the Node backend and set VITE_API_BASE_URL for the frontend.';
     throw new ApiRequestError(
       `Unable to reach the backend server. ${targetHint}`,
-      503
+      503,
+      'BACKEND_UNAVAILABLE',
+      undefined,
+      true
     );
   }
 }
@@ -210,18 +213,21 @@ export class ApiRequestError extends Error {
   status: number;
   code?: string;
   billing?: BillingStatus;
+  isBackendUnavailable: boolean;
 
   constructor(
     message: string,
     status: number,
     code?: string,
-    billing?: BillingStatus
+    billing?: BillingStatus,
+    isBackendUnavailable = false
   ) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
     this.code = code;
     this.billing = billing;
+    this.isBackendUnavailable = isBackendUnavailable;
   }
 }
 
@@ -234,10 +240,13 @@ export async function parseApiJson<T>(
   if (!contentType.includes('application/json')) {
     const targetHint = base
       ? `Verify ${base}/api/health responds with JSON.`
-      : 'Deploy the Node backend and connect its URL below (or set VITE_API_BASE_URL).';
+      : 'Deploy the Node backend and set VITE_API_BASE_URL for the frontend.';
     throw new ApiRequestError(
       `The backend API server is not running on this host. ${targetHint}`,
-      res.status || 503
+      res.status || 503,
+      'BACKEND_UNAVAILABLE',
+      undefined,
+      true
     );
   }
   const data = await res.json();

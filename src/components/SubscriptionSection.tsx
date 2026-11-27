@@ -119,7 +119,7 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
       onBillingUpdate(status);
       return { workspace: status, hasBackend: true };
     } catch (err) {
-      if (err instanceof ApiRequestError && err.status === 503) {
+      if (err instanceof ApiRequestError && err.isBackendUnavailable) {
         const fallback = getStaticFallbackBilling();
         onBillingUpdate(fallback);
         return { workspace: fallback, hasBackend: false };
@@ -179,7 +179,7 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
       }
       setSuccessNote('Pro subscription active.');
     } catch (err) {
-      if (err instanceof ApiRequestError && err.status === 503) {
+      if (err instanceof ApiRequestError && err.isBackendUnavailable) {
         const next = saveStaticFallbackBilling({
           isSubscribed: true,
           planStatus: 'active',
@@ -214,7 +214,7 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
         setPendingNote('Checkout submitted. Waiting for Paddle confirmation...');
       }
     } catch (err) {
-      if (err instanceof ApiRequestError && err.status === 503) {
+      if (err instanceof ApiRequestError && err.isBackendUnavailable) {
         const next = saveStaticFallbackBilling({
           isSubscribed: true,
           planStatus: 'active',
@@ -260,8 +260,8 @@ export const SubscriptionSection: React.FC<SubscriptionSectionProps> = ({
           }
           preCreatedTransactionId = checkoutData.transactionId;
         } catch (err) {
-          // If the host is static-only (503 / non-JSON), fall back cleanly to client-side Paddle items checkout.
-          if (!(err instanceof ApiRequestError && err.status === 503)) {
+          // If the host is static-only (404/HTML or unreachable backend), fall back cleanly to client-side Paddle items checkout.
+          if (!(err instanceof ApiRequestError && err.isBackendUnavailable)) {
             throw err;
           }
         }
